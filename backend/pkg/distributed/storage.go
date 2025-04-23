@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	httpclient "backend/internal/httpClient"
@@ -26,6 +27,7 @@ type DistributedStorage struct {
 	metadataService metadata.MetadataService
 	chunkManager   *chunk.ChunkManager
 	failedServers map[string]bool
+	failedServersMutex sync.RWMutex
 	
 	// Health monitoring
 	monitoringActive bool
@@ -135,7 +137,9 @@ func (ds *DistributedStorage) checkAllServersHealth() {
 		client, err := ds.clientManager.GetClient(serverID)
 		if err != nil {
 			log.Printf("Health check: Unable to get client for server %s: %v", serverID, err)
+			ds.failedServersMutex.Lock()
 			ds.failedServers[serverID] = true
+			ds.failedServersMutex.Unlock()
 			continue
 		}
 		
@@ -144,19 +148,29 @@ func (ds *DistributedStorage) checkAllServersHealth() {
 		
 		// Update server status based on result
 		if err != nil {
+			ds.failedServersMutex.Lock()
 			if !ds.failedServers[serverID] {
 				log.Printf("Health check: Server %s is DOWN: %v", serverID, err)
+				
 				ds.failedServers[serverID] = true
+				
 			}
+			ds.failedServersMutex.Unlock()
 		} else {
+			ds.failedServersMutex.Lock()
 			if ds.failedServers[serverID] {
 				log.Printf("Health check: Server %s has RECOVERED", serverID)
+
 				delete(ds.failedServers, serverID)
 			}
+				ds.failedServersMutex.Unlock()
+			
 		}
 	}
 	
 	// Log summary of available servers
+	// Lock while reading
+	ds.failedServersMutex.RLock()
 	availableCount := 4 - len(ds.failedServers)
 	if len(ds.failedServers) > 0 {
 		failedList := ""
@@ -166,15 +180,19 @@ func (ds *DistributedStorage) checkAllServersHealth() {
 			}
 			failedList += server
 		}
+		ds.failedServersMutex.RUnlock()
 		log.Printf("Health check complete: %d/%d servers available. Failed servers: %s", 
 			availableCount, 4, failedList)
 	} else {
+		ds.failedServersMutex.RUnlock()
 		log.Printf("Health check complete: All servers available")
 	}
 }
 
 // Modify the selectServer function to be aware of failed servers
 func (ds *DistributedStorage) selectHealthyServer(chunkIndex int) (string, error) {
+	ds.failedServersMutex.RLock()
+    defer ds.failedServersMutex.RUnlock()
 	// Get the list of available servers (not in failedServers)
 	availableServers := []string{}
 	for i := 1; i <= 4; i++ {
@@ -327,23 +345,23 @@ func (ds *DistributedStorage) Upload(file io.Reader, filename string) (string, e
 
 // Download retrieves a file by filename and version with improved error handling for server failures
 func (ds *DistributedStorage) Download(filename string, version int) ([]byte, error) {
-	// Get file metadata
-	fileMetadata, err := ds.metadataService.GetMetadataByFilename(filename)
+	var fileMetadata *metadata.FileMetadata
+	var err error
+
+	// Get file metadata based on version
+	if version <= 0 {
+		// Get latest version if not specified
+		fileMetadata, err = ds.metadataService.FindLatestVersion(filename)
+	} else {
+		// Get specific version
+		fileMetadata, err = ds.metadataService.GetSpecificVersion(filename, version)
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to get metadata for %s: %w", filename, err)
 	}
 
-	// Check if specific version exists
-	if version <= 0 {
-		// Use the latest version if not specified
-		version = fileMetadata.Version
-	} else if version > fileMetadata.Version {
-		return nil, fmt.Errorf("version %d does not exist for file %s (latest: %d)", 
-			version, filename, fileMetadata.Version)
-	}
-
 	// Get chunk info from metadata
-	// Using existing Chunks field instead of VersionChunks which doesn't exist
 	chunks := fileMetadata.Chunks
 	if len(chunks) == 0 {
 		return nil, fmt.Errorf("file %s has no chunks", filename)
@@ -421,26 +439,26 @@ func (ds *DistributedStorage) Download(filename string, version int) ([]byte, er
 }
 
 // Custom ReadCloser to ensure underlying chunk streams are closed
-type chunkClosingReadCloser struct {
-	reader  io.Reader
-	closers []io.ReadCloser
-}
+// type chunkClosingReadCloser struct {
+// 	reader  io.Reader
+// 	closers []io.ReadCloser
+// }
 
-func (c *chunkClosingReadCloser) Read(p []byte) (n int, err error) {
-	return c.reader.Read(p)
-}
+// func (c *chunkClosingReadCloser) Read(p []byte) (n int, err error) {
+// 	return c.reader.Read(p)
+// }
 
-func (c *chunkClosingReadCloser) Close() error {
-	var firstErr error
-	for _, closer := range c.closers {
-		if closer != nil {
-			if err := closer.Close(); err != nil && firstErr == nil {
-				firstErr = err // Record the first error encountered
-			}
-		}
-	}
-	return firstErr
-}
+// func (c *chunkClosingReadCloser) Close() error {
+// 	var firstErr error
+// 	for _, closer := range c.closers {
+// 		if closer != nil {
+// 			if err := closer.Close(); err != nil && firstErr == nil {
+// 				firstErr = err // Record the first error encountered
+// 			}
+// 		}
+// 	}
+// 	return firstErr
+// }
 
 func (ds *DistributedStorage) List() ([]string, error) {
 	// Get all metadata
@@ -653,9 +671,11 @@ func (ds *DistributedStorage) cleanupPartialUpload(chunks []UploadedChunk, filen
 // attemptChunkDeletion tries to delete a single chunk and returns true if successful
 func (ds *DistributedStorage) attemptChunkDeletion(chunk UploadedChunk) bool {
 	log.Printf("Deleting chunk %s from server %s", chunk.ChunkID, chunk.ServerID)
-	
+	ds.failedServersMutex.RLock()
+	isFailed := ds.failedServers[chunk.ServerID]
+	ds.failedServersMutex.RUnlock()
 	// Skip servers we know are down
-	if ds.failedServers[chunk.ServerID] {
+	if isFailed {
 		log.Printf("Skipping deletion for chunk %s on known failed server %s",
 			chunk.ChunkID, chunk.ServerID)
 		return false
@@ -666,7 +686,9 @@ func (ds *DistributedStorage) attemptChunkDeletion(chunk UploadedChunk) bool {
 		log.Printf("WARNING: Failed to get client for server %s during deletion: %v",
 			chunk.ServerID, err)
 		// Update the failedServers map
+		ds.failedServersMutex.Lock()
 		ds.failedServers[chunk.ServerID] = true
+		ds.failedServersMutex.Unlock()
 		return false
 	}
 	
@@ -676,7 +698,9 @@ func (ds *DistributedStorage) attemptChunkDeletion(chunk UploadedChunk) bool {
 		log.Printf("WARNING: Failed to delete chunk %s from server %s: %v",
 			chunk.ChunkID, chunk.ServerID, err)
 		// Update the failedServers map if deletion fails due to server issues
+		ds.failedServersMutex.Lock()
 		ds.failedServers[chunk.ServerID] = true
+		ds.failedServersMutex.Unlock()
 		return false
 	} 
 	
