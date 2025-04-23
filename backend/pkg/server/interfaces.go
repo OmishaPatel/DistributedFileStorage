@@ -3,27 +3,22 @@ package server
 import (
 	"backend/pkg/distributed"
 	"backend/pkg/metadata"
+	"backend/pkg/models"
 	"backend/pkg/storage"
 	"strings"
-	"time"
 )
 
 type ServerInterface interface {
 	Run(addr string) error
 }
 
-type FileInfo struct {
-	Filename     string    `json:"filename"`
-	Size         int64     `json:"size"`
-	LastModified time.Time `json:"last_modified"`
-	Version      int       `json:"version"`
-}
+// FileInfo is now imported from models package
+type FileInfo = models.FileInfo
 
 type CoordinatorConfig struct {
 	ServerID string
 	DistributedStorage *distributed.DistributedStorage
 	MetadataService metadata.MetadataService
-
 }
 
 type StorageNodeConfig struct {

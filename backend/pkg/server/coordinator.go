@@ -5,7 +5,6 @@ import (
 	"backend/pkg/metadata"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -100,65 +99,62 @@ func (s *CoordinatorServer) handleDownloadFile(c *gin.Context) {
 	filename := c.Param("filename")
 	versionQuery := c.Query("version")
 
-	var meta *metadata.FileMetadata
+	var version int = 0 // Default to latest version
 	var err error
 
 	if versionQuery != "" {
-		version, convErr := strconv.Atoi(versionQuery)
-		if convErr != nil {
+		version, err = strconv.Atoi(versionQuery)
+		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid version number format"})
 			return
 		}
 		log.Printf("Attempting to download version %d of file '%s'", version, filename)
-		meta, err = s.distStorage.GetSpecificVersionMetadata(filename, version)
 	} else {
 		log.Printf("Attempting to download latest version of file '%s'", filename)
-		meta, err = s.distStorage.GetMetadataByFilename(filename)
 	}
 
- // Handle errors from metadata lookup
-
+	// Download the file using the updated interface
+	fileData, err := s.distStorage.Download(filename, version)
 	if err != nil {
+		log.Printf("Error downloading file '%s' (version %d): %v", filename, version, err)
+		
+		// Check for specific error types
 		if errors.Is(err, os.ErrNotExist) {
-			errMsg := fmt.Sprintf("File metadata not found for '%s'", filename)
-			if versionQuery != "" {
-				errMsg += fmt.Sprintf(" version %s", versionQuery)
-			}
-			c.JSON(http.StatusNotFound, gin.H{"error": errMsg})
-		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Error retrieving metadata: %v", err)})
+			c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("File not found: %s", filename)})
+			return
 		}
+		
+		// Check if the error message contains something about "unavailable" or "incomplete"
+		if strings.Contains(err.Error(), "incomplete") || strings.Contains(err.Error(), "unavailable") {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error": "File is currently unavailable due to storage node failures",
+				"detail": err.Error(),
+			})
+			return
+		}
+		
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to download file: %v", err)})
 		return
-    }
-	// download using fileID
-	log.Printf("Downloading fileID %s (version %d)", meta.FileID, meta.Version)
-	fileReader, err := s.distStorage.Download(meta.FileID)
-
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("Chunk data not found for fileID %s (version %d)", meta.FileID, meta.Version)})
-		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to download file content: %v", err)})
-		}
-		return 
 	}
-	defer fileReader.Close()
 
-	downloadFilename := fmt.Sprintf("%s_v%d%s", 
-		strings.TrimSuffix(filename, filepath.Ext(filename)), 
-		meta.Version, 
-		filepath.Ext(filename))
-	c.Header("Content-Disposition", "attachment; filename="+downloadFilename)
-	c.Header("Content-Type", "application/octet-stream")
-
-	// actual content from file being stremed from file reader to response writer
-	_, err = io.Copy(c.Writer, fileReader)
+	// Get metadata for the content disposition header
+	meta, err := s.distStorage.GetMetadataByFilename(filename)
 	if err != nil {
-		log.Printf("Error streaming file %s (fileID %s, version %d): %v", filename, meta.FileID, meta.Version, err)
-		if !c.Writer.Written() {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to stream file"})
-		}
-	}		
+		// We have the file data but not the metadata, this is strange but can still serve the file
+		log.Printf("Warning: File data available but metadata missing for '%s'", filename)
+		downloadFilename := filename
+		c.Header("Content-Disposition", "attachment; filename="+downloadFilename)
+	} else {
+		// Format the download filename with version
+		downloadFilename := fmt.Sprintf("%s_v%d%s", 
+			strings.TrimSuffix(filename, filepath.Ext(filename)), 
+			meta.Version, 
+			filepath.Ext(filename))
+		c.Header("Content-Disposition", "attachment; filename="+downloadFilename)
+	}
+	
+	c.Header("Content-Type", "application/octet-stream")
+	c.Data(http.StatusOK, "application/octet-stream", fileData)
 }
 
 func (s *CoordinatorServer) handleDeleteFile(c *gin.Context) {
@@ -185,30 +181,12 @@ func (s *CoordinatorServer) handleDeleteFile(c *gin.Context) {
 }
 
 func (s *CoordinatorServer) handleListFiles(c *gin.Context) {
-	metadataList, err := s.distStorage.GetAllMetadata()
+	// The updated GetAllMetadata now returns distributed.FileInfo objects with availability status
+	fileInfos, err := s.distStorage.GetAllMetadata()
 
 	if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to retrieve file metadata list: %v", err)})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to retrieve file list: %v", err)})
 		return
-	}
-	// group by file name and find the latest version
-
-	latestFilesMap := make(map[string]*metadata.FileMetadata)
-	for _,meta := range metadataList {
-		if existing, found := latestFilesMap[meta.OriginalName]; !found || meta.Version > existing.Version {
-			latestFilesMap[meta.OriginalName] = meta
-		}
-	}
-
-		// Format the response with the desired fields for the latest versions
-	fileInfos := make([]FileInfo, 0, len(latestFilesMap))
-	for _, meta := range latestFilesMap {
-		fileInfos = append(fileInfos, FileInfo{
-			Filename:     meta.OriginalName,
-			Size:         meta.TotalSize,
-			LastModified: meta.LastModified,
-			Version:      meta.Version,
-		})
 	}
 
 	// Sort the final list by filename
@@ -216,6 +194,7 @@ func (s *CoordinatorServer) handleListFiles(c *gin.Context) {
 		return fileInfos[i].Filename < fileInfos[j].Filename
 	})
 
+	// Convert the distributed.FileInfo objects to the API response format
 	c.JSON(http.StatusOK, gin.H{
 		"files": fileInfos,
 		"serverID": s.serverID,

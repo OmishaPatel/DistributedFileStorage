@@ -28,7 +28,7 @@ func main() {
 	// Initialize health check for storage nodes
 	numServers := 4
 	log.Printf("Checking health of %d storage nodes...", numServers)
-	
+
 	for i := 1; i <= numServers; i++ {
 		serverID := fmt.Sprintf("server%d", i)
 		log.Printf("Checking health of storage node %s", serverID)
@@ -43,6 +43,7 @@ func main() {
 		// Test connection
 		if err := nodeClient.HealthCheck(); err != nil {
 			log.Printf("Warning: Storage node %s not responding: %v", serverID, err)
+
 		} else {
 			log.Printf("Successfully connected to storage node %s", serverID)
 		}
