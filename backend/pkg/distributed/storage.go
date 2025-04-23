@@ -25,7 +25,11 @@ type DistributedStorage struct {
 	chunkManager   *chunk.ChunkManager
 }
 
-
+// UploadedChunk represents a chunk that was successfully uploaded to a storage node
+type UploadedChunk struct {
+	ChunkID  string
+	ServerID string
+}
 
 // NewDistributedStorageWithClientManager creates a new distributed storage with a provided client manager
 func NewDistributedStorageWithClientManager(metadataService metadata.MetadataService, clientManager *httpclient.ClientManager) *DistributedStorage {
@@ -88,6 +92,9 @@ func (ds *DistributedStorage) Upload(file io.Reader, filename string) (string, e
 	
 	// Track failed servers to avoid retrying them
 	failedServers := make(map[string]bool)
+	
+	// Track successful uploads for cleanup in case of partial failure
+	var successfulUploads []UploadedChunk
 	
 	for i, chunkReader := range chunks {
 		// Try to upload the chunk with retries on different servers if needed
@@ -153,6 +160,12 @@ func (ds *DistributedStorage) Upload(file io.Reader, filename string) (string, e
 			}
 			metadata.Chunks = append(metadata.Chunks, chunkMeta)
 			
+			// Track successful upload for potential cleanup
+			successfulUploads = append(successfulUploads, UploadedChunk{
+				ChunkID:  chunkID,
+				ServerID: serverID,
+			})
+			
 			// Log success or server change
 			if initialServerID != serverID {
 				log.Printf("Successfully uploaded chunk %d to alternate server %s (original %s was down)",
@@ -174,9 +187,10 @@ func (ds *DistributedStorage) Upload(file io.Reader, filename string) (string, e
 		// For now, we'll fail if any chunk failed
 		log.Printf("ERROR: Upload of %s failed with %d chunk failures", filename, len(uploadErrors))
 		
-		// TODO: Implement cleanup for partial uploads
-		// This would involve removing any chunks that were successfully uploaded
-		// before returning the error
+		// Implement cleanup for partial uploads by deleting all successful chunks
+		if len(successfulUploads) > 0 {
+			ds.cleanupPartialUpload(successfulUploads, filename, failedServers)
+		}
 		
 		return "", fmt.Errorf("upload failed: %d/%d chunks could not be uploaded: %v", 
 			len(uploadErrors), len(chunks), uploadErrors[0])
@@ -290,48 +304,93 @@ func (ds *DistributedStorage) Delete(filename string) error {
 		return fmt.Errorf("failed to get metadata for delete by filename '%s': %w", filename, err)
 	}
 	fileID := meta.FileID
-
-	// 2. Delete chunks from respective servers
-	var firstChunkErr error
-	log.Printf("Deleting %d chunks for fileID %s (filename: %s)", len(meta.Chunks), fileID, filename)
-	for _, chunk := range meta.Chunks {
-		client, err := ds.clientManager.GetClient(chunk.ServerID)
-		if err != nil {
-			log.Printf("Warning: Failed to get client for server %s during delete: %v", chunk.ServerID, err)
-			if firstChunkErr == nil {
-				firstChunkErr = err
-			}
-			continue
-		}
-
-		log.Printf("Attempting to delete chunk %s from server %s", chunk.ChunkID, chunk.ServerID)
-		if err := client.DeleteChunk(chunk.ChunkID); err != nil {
-			// Don't stop on error, try to delete as many chunks as possible
-			if firstChunkErr == nil {
-				firstChunkErr = fmt.Errorf("failed to delete chunk %s from server %s: %w", chunk.ChunkID, chunk.ServerID, err)
-			}
-			log.Printf("Error deleting chunk %s from server %s: %v", chunk.ChunkID, chunk.ServerID, err)
-			// Consider adding retry logic here?
-		} else {
-			log.Printf("Successfully deleted chunk %s from server %s", chunk.ChunkID, chunk.ServerID)
+	
+	// 2. Convert chunk metadata to UploadedChunk format for deletion
+	chunksToDelete := make([]UploadedChunk, 0, len(meta.Chunks))
+	for _, chunkMeta := range meta.Chunks {
+		chunksToDelete = append(chunksToDelete, UploadedChunk{
+			ChunkID:  chunkMeta.ChunkID,
+			ServerID: chunkMeta.ServerID,
+		})
+	}
+	
+	// 3. Delete the chunks using our enhanced deletion mechanism
+	log.Printf("Deleting %d chunks for fileID %s (filename: %s)", len(chunksToDelete), fileID, filename)
+	
+	// Create a map for tracking failed servers during deletion
+	failedServers := make(map[string]bool)
+	
+	// Track which chunks failed deletion
+	var failedChunks []UploadedChunk
+	
+	// First attempt at deletion
+	for _, chunk := range chunksToDelete {
+		success := ds.attemptChunkDeletion(chunk, failedServers)
+		if !success {
+			failedChunks = append(failedChunks, chunk)
 		}
 	}
-
-	// 3. Delete metadata (only if chunk deletion didn't report critical errors?)
-	// If firstChunkErr is nil (all chunk deletes succeeded or were ignored), delete metadata.
-	if firstChunkErr == nil {
+	
+	// Retry failures with backoff
+	if len(failedChunks) > 0 {
+		log.Printf("Retrying deletion for %d chunks that failed initial attempt", len(failedChunks))
+		
+		for retryCount := 0; retryCount < 3 && len(failedChunks) > 0; retryCount++ {
+			// Wait before retry (exponential backoff)
+			backoffTime := time.Duration(500*(1<<retryCount)) * time.Millisecond // 500ms, 1s, 2s
+			log.Printf("Waiting %v before retry attempt %d...", backoffTime, retryCount+1)
+			time.Sleep(backoffTime)
+			
+			// Try again with the failed chunks
+			var stillFailed []UploadedChunk
+			for _, chunk := range failedChunks {
+				success := ds.attemptChunkDeletion(chunk, failedServers)
+				if !success {
+					stillFailed = append(stillFailed, chunk)
+				}
+			}
+			
+			// Update the list of failed deletions
+			failedChunks = stillFailed
+			
+			if len(failedChunks) == 0 {
+				log.Printf("All deletion retries succeeded!")
+				break
+			} else {
+				log.Printf("Still have %d chunks that failed deletion after retry %d", 
+					len(failedChunks), retryCount+1)
+			}
+		}
+	}
+	
+	// 4. Delete metadata if all chunks were deleted, or if we have acceptable failures
+	// Define acceptable as: we tried our best and most chunks were deleted
+	if len(failedChunks) == 0 || float64(len(failedChunks))/float64(len(chunksToDelete)) < 0.25 {
+		// Delete metadata if all chunks were deleted or if less than 25% failed
 		log.Printf("Deleting metadata for fileID %s (filename: %s)", fileID, filename)
 		if err := ds.metadataService.DeleteMetadata(fileID); err != nil {
-			// If metadata delete fails after chunks were deleted, we have dangling chunks!
-			log.Printf("CRITICAL: Failed to delete metadata for fileID %s after successful chunk deletion: %v", fileID, err)
+			// If metadata delete fails after chunks were deleted, we have dangling chunks
+			log.Printf("CRITICAL: Failed to delete metadata for fileID %s after chunk deletion: %v", fileID, err)
 			return fmt.Errorf("failed to delete metadata after chunk deletion: %w", err)
 		}
 		log.Printf("Successfully deleted metadata for fileID %s", fileID)
+		
+		// Warn about any failed chunks
+		if len(failedChunks) > 0 {
+			log.Printf("WARNING: %d/%d chunks could not be deleted but metadata was removed",
+				len(failedChunks), len(chunksToDelete))
+			for _, chunk := range failedChunks {
+				log.Printf("  - Orphaned chunk: ChunkID %s on ServerID %s", chunk.ChunkID, chunk.ServerID)
+			}
+		}
 	} else {
-		// If chunk deletion failed, maybe *don't* delete metadata yet?
-		// This leaves the file potentially recoverable or allows for manual cleanup.
-		log.Printf("Skipping metadata deletion for fileID %s due to chunk deletion errors: %v", fileID, firstChunkErr)
-		return firstChunkErr // Return the first error encountered during chunk deletion
+		// Too many chunks failed deletion, don't delete metadata to allow for recovery
+		log.Printf("ERROR: Failed to delete %d/%d chunks for fileID %s, keeping metadata for recovery",
+			len(failedChunks), len(chunksToDelete), fileID)
+		
+		// Return an error with details
+		return fmt.Errorf("delete failed: %d/%d chunks could not be deleted, metadata preserved for recovery",
+			len(failedChunks), len(chunksToDelete))
 	}
 
 	return nil // Overall success
@@ -372,4 +431,100 @@ func (ds *DistributedStorage) GetSpecificVersionMetadata(filename string, versio
 // This is primarily used for health reporting.
 func (ds *DistributedStorage) GetClientManager() *httpclient.ClientManager {
 	return ds.clientManager
+}
+
+// cleanupPartialUpload deletes chunks that were successfully uploaded during a failed upload
+func (ds *DistributedStorage) cleanupPartialUpload(chunks []UploadedChunk, filename string, failedServers map[string]bool) {
+	if len(chunks) == 0 {
+		return
+	}
+
+	log.Printf("Cleaning up %d successfully uploaded chunks for failed upload of %s",
+		len(chunks), filename)
+	
+	// Track chunks that failed cleanup for retry
+	var failedCleanups []UploadedChunk
+	
+	// First attempt at cleanup
+	for _, chunk := range chunks {
+		success := ds.attemptChunkDeletion(chunk, failedServers)
+		if !success {
+			failedCleanups = append(failedCleanups, chunk)
+		}
+	}
+	
+	// Retry failed cleanups with exponential backoff
+	if len(failedCleanups) > 0 {
+		log.Printf("Retrying cleanup for %d chunks that failed initial deletion", len(failedCleanups))
+		
+		for retryCount := 0; retryCount < 3 && len(failedCleanups) > 0; retryCount++ {
+			// Wait before retry (exponential backoff)
+			backoffTime := time.Duration(500*(1<<retryCount)) * time.Millisecond // 500ms, 1s, 2s
+			log.Printf("Waiting %v before retry attempt %d...", backoffTime, retryCount+1)
+			time.Sleep(backoffTime)
+			
+			// Try again with the failed chunks
+			var stillFailed []UploadedChunk
+			for _, chunk := range failedCleanups {
+				success := ds.attemptChunkDeletion(chunk, failedServers)
+				if !success {
+					stillFailed = append(stillFailed, chunk)
+				}
+			}
+			
+			// Update the list of failed cleanups
+			failedCleanups = stillFailed
+			
+			if len(failedCleanups) == 0 {
+				log.Printf("All cleanup retries succeeded!")
+				break
+			} else {
+				log.Printf("Still have %d chunks that failed cleanup after retry %d", 
+					len(failedCleanups), retryCount+1)
+			}
+		}
+	}
+	
+	// Final report
+	if len(failedCleanups) > 0 {
+		log.Printf("WARNING: Cleanup partially failed for %d chunks; some chunks may remain orphaned",
+			len(failedCleanups))
+		for _, chunk := range failedCleanups {
+			log.Printf("  - Failed to clean up: ChunkID %s on ServerID %s", chunk.ChunkID, chunk.ServerID)
+		}
+	} else {
+		log.Printf("Successfully cleaned up all chunks for failed upload of %s", filename)
+	}
+}
+
+// attemptChunkDeletion tries to delete a single chunk and returns true if successful
+func (ds *DistributedStorage) attemptChunkDeletion(chunk UploadedChunk, failedServers map[string]bool) bool {
+	log.Printf("Deleting chunk %s from server %s due to partial upload failure",
+		chunk.ChunkID, chunk.ServerID)
+	
+	// Skip servers we know are down
+	if failedServers[chunk.ServerID] {
+		log.Printf("Skipping cleanup for chunk %s on failed server %s",
+			chunk.ChunkID, chunk.ServerID)
+		return false
+	}
+	
+	client, err := ds.clientManager.GetClient(chunk.ServerID)
+	if err != nil {
+		log.Printf("WARNING: Failed to get client for server %s during cleanup: %v",
+			chunk.ServerID, err)
+		return false
+	}
+	
+	// Delete the chunk
+	err = client.DeleteChunk(chunk.ChunkID)
+	if err != nil {
+		log.Printf("WARNING: Failed to delete chunk %s from server %s during cleanup: %v",
+			chunk.ChunkID, chunk.ServerID, err)
+		return false
+	} 
+	
+	log.Printf("Successfully deleted chunk %s from server %s during cleanup",
+		chunk.ChunkID, chunk.ServerID)
+	return true
 }
