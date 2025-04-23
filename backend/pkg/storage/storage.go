@@ -7,50 +7,54 @@ import (
 	"path/filepath"
 )
 
-// Creates Generic interface can use cloud or local
+// FileStorage defines the interface for file storage operations
 type FileStorage interface {
 	Upload(file io.Reader, filename string) (string, error)
 	Download(filename string) (io.ReadCloser, error)
 	Delete(filename string) error
 	List() ([]string, error)
 }
- //Concrete implementation of FileStorage interface
-type LocalStorage struct {
+
+// localFileStorage is a concrete implementation of FileStorage 
+// that stores files in the local filesystem
+type localFileStorage struct {
 	baseDir string
 }
 
-func NewLocalStorage(baseDir string) (*LocalStorage, error) {
+// NewLocalStorage creates a new FileStorage implementation that stores files on the local filesystem
+// It returns the interface rather than the concrete type for better flexibility
+func NewLocalStorage(baseDir string) (FileStorage, error) {
 	// Create base directory if it doesn't exist
 	if err := os.MkdirAll(baseDir, 0755); err != nil {
 		return nil, err
 	}
-	return &LocalStorage{baseDir: baseDir}, nil
+	return &localFileStorage{baseDir: baseDir}, nil
 }
-//difference between struct and interface
-func (s *LocalStorage) Upload(file io.Reader, filename string, ) (string, error) {
+
+func (s *localFileStorage) Upload(file io.Reader, filename string) (string, error) {
 	filepath := filepath.Join(s.baseDir, filename)
 	dst, err := os.Create(filepath)
 	if err != nil {
-		return "",fmt.Errorf("failed to create file %s: %w", filepath, err)
+		return "", fmt.Errorf("failed to create file %s: %w", filepath, err)
 	}
-	defer dst.Close() // does this need to be closed?
+	defer dst.Close()
 
 	if _, err := io.Copy(dst, file); err != nil {
-		return "",fmt.Errorf("failed to create file %s: %w", filepath, err)
+		return "", fmt.Errorf("failed to write to file %s: %w", filepath, err)
 	}
 
 	return filepath, nil
 }
 
-func (s *LocalStorage) Download(filename string) (io.ReadCloser, error) {
+func (s *localFileStorage) Download(filename string) (io.ReadCloser, error) {
 	return os.Open(filepath.Join(s.baseDir, filename))
 }
 
-func (s *LocalStorage) Delete(filename string) error {
+func (s *localFileStorage) Delete(filename string) error {
 	return os.Remove(filepath.Join(s.baseDir, filename))
 }
 
-func (s *LocalStorage) List() ([]string, error) {
+func (s *localFileStorage) List() ([]string, error) {
 	files, err := os.ReadDir(s.baseDir)
 	if err != nil {
 		return nil, err

@@ -16,8 +16,8 @@ import (
 	httpclient "backend/internal/httpClient"
 	"backend/pkg/chunk"
 	"backend/pkg/metadata"
-	"backend/pkg/util"
 	"backend/pkg/models"
+	"backend/pkg/util"
 )
 
 // DistributedStorage struct with added health monitoring fields
@@ -198,7 +198,7 @@ func (ds *DistributedStorage) Upload(file io.Reader, filename string) (string, e
 	// Generate unique file ID - This ID should ideally be stable across versions *or* version specific.
 	// For now, let's make it version-specific by potentially including version in generation later?
 	// Keeping it simple for now: ID is potentially unique per upload instance.
-	fileID := generateFileID(filename) 
+	fileID := generateFileID(filename)
 
 	// --- Versioning Logic Start ---
 	newVersion := 1
