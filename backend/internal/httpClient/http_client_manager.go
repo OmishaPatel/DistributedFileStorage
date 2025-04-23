@@ -80,69 +80,102 @@ func (cm *ClientManager) GetClient(serverID string) (NodeStorageClient, error) {
 	return nodeClient, nil
 }
 
+// NodeHealth represents the health status of a single storage node
+type NodeHealth struct {
+	ServerID     string `json:"serverId"`
+	Healthy      bool   `json:"healthy"`
+	CircuitState string `json:"circuitState"`
+	Error        string `json:"error,omitempty"`
+}
+
+// NodesStatus represents the overall health status of all storage nodes
+type NodesStatus struct {
+	Nodes        []NodeHealth `json:"nodes"`
+	HealthyCount int          `json:"healthyCount"`
+	TotalCount   int          `json:"totalCount"`
+	IsHealthy    bool         `json:"isHealthy"`
+}
+
 // GetNodeHealth returns the health status and circuit state for a specific node
-func (cm *ClientManager) GetNodeHealth(serverID string) (bool, string, error) {
+func (cm *ClientManager) GetNodeHealth(serverID string) (NodeHealth, error) {
+	health := NodeHealth{
+		ServerID:     serverID,
+		Healthy:      false,
+		CircuitState: "UNKNOWN",
+	}
+
 	nodeClient, err := cm.GetClient(serverID)
 	if err != nil {
-		return false, "UNKNOWN", err
+		health.Error = err.Error()
+		return health, err
 	}
 	
 	// Check if we can cast to access the circuit state methods
 	if nc, ok := nodeClient.(*NodeClient); ok {
-		isAvailable := nc.IsAvailable()
-		state := nc.CircuitState()
+		health.CircuitState = nc.CircuitState()
 		
 		// If circuit is closed or half-open, perform an actual health check
-		if isAvailable {
+		if nc.IsAvailable() {
 			err := nodeClient.HealthCheck()
 			if err != nil {
-				return false, state, err
+				health.Error = err.Error()
+				return health, err
 			}
-			return true, state, nil
+			health.Healthy = true
+			return health, nil
 		}
 		
-		return false, state, fmt.Errorf("circuit breaker is open for server %s", serverID)
+		health.Error = fmt.Sprintf("circuit breaker is open for server %s", serverID)
+		return health, fmt.Errorf(health.Error)
 	}
 	
 	// Fallback if type assertion fails
 	err = nodeClient.HealthCheck()
-	return err == nil, "UNKNOWN", err
+	health.Healthy = err == nil
+	if err != nil {
+		health.Error = err.Error()
+	}
+	return health, err
 }
 
 // GetAllNodesHealth returns health status for all nodes
-func (cm *ClientManager) GetAllNodesHealth() map[string]map[string]interface{} {
+func (cm *ClientManager) GetAllNodesHealth() NodesStatus {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()
 	
-	result := make(map[string]map[string]interface{})
+	result := NodesStatus{}
 	
 	// Check each node in our cache
 	for serverID := range cm.nodeClients {
-		health, state, err := cm.GetNodeHealth(serverID)
+		health, _ := cm.GetNodeHealth(serverID)
+		result.Nodes = append(result.Nodes, health)
 		
-		nodeStatus := map[string]interface{}{
-			"healthy":      health,
-			"circuitState": state,
+		if health.Healthy {
+			result.HealthyCount++
 		}
-		
-		if err != nil {
-			nodeStatus["error"] = err.Error()
-		}
-		
-		result[serverID] = nodeStatus
 	}
 	
 	// Also check for any missing nodes (we should have server1-server4)
+	checkedIDs := make(map[string]bool)
+	for _, health := range result.Nodes {
+		checkedIDs[health.ServerID] = true
+	}
+	
 	for i := 1; i <= 4; i++ {
 		serverID := fmt.Sprintf("server%d", i)
-		if _, exists := result[serverID]; !exists {
-			result[serverID] = map[string]interface{}{
-				"healthy":      false,
-				"circuitState": "UNKNOWN",
-				"error":        "Node client not initialized",
-			}
+		if !checkedIDs[serverID] {
+			result.Nodes = append(result.Nodes, NodeHealth{
+				ServerID:     serverID,
+				Healthy:      false,
+				CircuitState: "UNKNOWN",
+				Error:        "Node client not initialized",
+			})
 		}
 	}
+	
+	result.TotalCount = len(result.Nodes)
+	// System is healthy if more than half of nodes are healthy
+	result.IsHealthy = result.HealthyCount >= (result.TotalCount / 2 + result.TotalCount % 2)
 	
 	return result
 }
