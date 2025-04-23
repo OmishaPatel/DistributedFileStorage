@@ -7,6 +7,13 @@ import (
 	"time"
 )
 
+// ClientManagerInterface defines operations that a client manager must support
+type ClientManagerInterface interface {
+	GetClient(serverID string) (NodeStorageClient, error)
+	GetNodeHealth(serverID string) (NodeHealth, error)
+	GetAllNodesHealth() NodesStatus
+}
+
 type ClientConfig struct {
 	MaxIdleConns        int
 	MaxIdleConnsPerHost int
@@ -34,7 +41,8 @@ func DefaultConfig() ClientConfig {
 	}
 }
 
-func NewClientManager(config ClientConfig) *ClientManager {
+// NewClientManager creates a new client manager and returns it as an interface
+func NewClientManager(config ClientConfig) ClientManagerInterface {
 	transport := &http.Transport{
 		MaxIdleConns:        config.MaxIdleConns,
 		MaxIdleConnsPerHost: config.MaxIdleConnsPerHost,

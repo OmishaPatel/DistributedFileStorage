@@ -7,25 +7,28 @@ import (
 	"sync"
 )
 
-type MemoryMetadataService struct {
+// memoryMetadataService is an in-memory implementation of the MetadataService interface
+type memoryMetadataService struct {
 	metadata map[string]*metadata.FileMetadata
 	mu       sync.RWMutex
 }
 
-func NewMemoryMetadataService() *MemoryMetadataService {
-	return &MemoryMetadataService{
+// NewMemoryMetadataService creates a new in-memory metadata service
+// Returns the interface instead of the concrete type for better flexibility
+func NewMemoryMetadataService() metadata.MetadataService {
+	return &memoryMetadataService{
 		metadata: make(map[string]*metadata.FileMetadata),
 	}
 }
 
-func (s *MemoryMetadataService) StoreMetadata(meta *metadata.FileMetadata) error {
+func (s *memoryMetadataService) StoreMetadata(meta *metadata.FileMetadata) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.metadata[meta.FileID] = meta
 	return nil
 }
 
-func (s *MemoryMetadataService) GetMetadata(fileID string) (*metadata.FileMetadata, error) {
+func (s *memoryMetadataService) GetMetadata(fileID string) (*metadata.FileMetadata, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if meta, exists := s.metadata[fileID]; exists {
@@ -34,7 +37,7 @@ func (s *MemoryMetadataService) GetMetadata(fileID string) (*metadata.FileMetada
 	return nil, errors.New("metadata not found")
 }
 
-func (s *MemoryMetadataService) ListFiles() ([]*metadata.FileMetadata, error) {
+func (s *memoryMetadataService) ListFiles() ([]*metadata.FileMetadata, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	files := make([]*metadata.FileMetadata, 0, len(s.metadata))
@@ -44,7 +47,7 @@ func (s *MemoryMetadataService) ListFiles() ([]*metadata.FileMetadata, error) {
 	return files, nil
 }
 
-func (s *MemoryMetadataService) DeleteMetadata(fileID string) error {
+func (s *memoryMetadataService) DeleteMetadata(fileID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, exists := s.metadata[fileID]; !exists {
@@ -54,7 +57,7 @@ func (s *MemoryMetadataService) DeleteMetadata(fileID string) error {
 	return nil
 }
 
-func (s *MemoryMetadataService) GetMetadataByFilename(filename string) (*metadata.FileMetadata, error) {
+func (s *memoryMetadataService) GetMetadataByFilename(filename string) (*metadata.FileMetadata, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, meta := range s.metadata {
@@ -66,7 +69,7 @@ func (s *MemoryMetadataService) GetMetadataByFilename(filename string) (*metadat
 }
 
 // FindLatestVersion finds the metadata for the latest version of a file by filename.
-func (s *MemoryMetadataService) FindLatestVersion(filename string) (*metadata.FileMetadata, error) {
+func (s *memoryMetadataService) FindLatestVersion(filename string) (*metadata.FileMetadata, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	var latestMeta *metadata.FileMetadata
@@ -91,7 +94,7 @@ func (s *MemoryMetadataService) FindLatestVersion(filename string) (*metadata.Fi
 }
 
 // GetSpecificVersion finds the metadata for a specific version of a file.
-func (s *MemoryMetadataService) GetSpecificVersion(filename string, version int) (*metadata.FileMetadata, error) {
+func (s *memoryMetadataService) GetSpecificVersion(filename string, version int) (*metadata.FileMetadata, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 

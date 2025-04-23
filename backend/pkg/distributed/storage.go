@@ -22,7 +22,7 @@ import (
 
 // DistributedStorage struct with added health monitoring fields
 type DistributedStorage struct {
-	clientManager *httpclient.ClientManager
+	clientManager httpclient.ClientManagerInterface
 	metadataService metadata.MetadataService
 	chunkManager   *chunk.ChunkManager
 	failedServers map[string]bool
@@ -60,7 +60,7 @@ type UploadedChunk struct {
 // }
 
 // NewDistributedStorageWithClientManager creates a new distributed storage with a provided client manager
-func NewDistributedStorageWithClientManager(metadataService metadata.MetadataService, clientManager *httpclient.ClientManager) *DistributedStorage {
+func NewDistributedStorageWithClientManager(metadataService metadata.MetadataService, clientManager httpclient.ClientManagerInterface) *DistributedStorage {
 	ds := &DistributedStorage{
 		clientManager:      clientManager,
 		metadataService:    metadataService,
@@ -613,7 +613,7 @@ func (ds *DistributedStorage) GetSpecificVersionMetadata(filename string, versio
 
 // GetClientManager returns the internal client manager used by this distributed storage.
 // This is primarily used for health reporting.
-func (ds *DistributedStorage) GetClientManager() *httpclient.ClientManager {
+func (ds *DistributedStorage) GetClientManager() httpclient.ClientManagerInterface {
 	return ds.clientManager
 }
 
