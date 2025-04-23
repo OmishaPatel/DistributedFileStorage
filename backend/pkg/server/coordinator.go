@@ -59,26 +59,37 @@ func (s *CoordinatorServer) handleUploadFile(c *gin.Context) {
 	file, err := c.FormFile("file")
 
 	if err != nil {
+		log.Printf("ERROR: Bad request when uploading file: %v", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	
 	sanitizedFileName := sanitizeFileName(file.Filename)
+	log.Printf("Processing upload request for file: %s", sanitizedFileName)
+	
 	src, err := file.Open()
-
 	if err != nil {
+		log.Printf("ERROR: Failed to open uploaded file %s: %v", sanitizedFileName, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
 	defer src.Close()
 
+	log.Printf("Starting distributed upload for file: %s", sanitizedFileName)
 	fileID, err := s.distStorage.Upload(src, sanitizedFileName)
 
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		log.Printf("ERROR: Distributed upload failed for %s: %v", sanitizedFileName, err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": fmt.Sprintf("Upload failed: %v", err),
+			"detail": err.Error(),
+		})
 		return
 	}
-		c.JSON(http.StatusOK, gin.H{
+	
+	log.Printf("SUCCESS: Distributed upload completed for %s, fileID: %s", sanitizedFileName, fileID)
+	c.JSON(http.StatusOK, gin.H{
 		"message":    "File uploaded successfully",
 		"fileID":     fileID,
 		"serverID":   s.serverID,
@@ -247,31 +258,18 @@ func (s *CoordinatorServer) handleSystemHealth(c *gin.Context) {
 		return
 	}
 	
-	nodeStatus := clientManager.GetAllNodesHealth()
-	
-	// Determine overall system health
-	systemHealthy := true
-	healthyNodes := 0
-	
-	for _, status := range nodeStatus {
-		if healthy, ok := status["healthy"].(bool); ok && healthy {
-			healthyNodes++
-		}
-	}
-	
-	// System is healthy if more than half of nodes are healthy
-	systemHealthy = healthyNodes >= 2 // Since we have 4 nodes, we need at least 2
+	nodesStatus := clientManager.GetAllNodesHealth()
 	
 	status := "healthy"
-	if !systemHealthy {
+	if !nodesStatus.IsHealthy {
 		status = "degraded"
 	}
 	
 	c.JSON(http.StatusOK, gin.H{
 		"status":       status,
-		"healthyNodes": healthyNodes,
-		"totalNodes":   len(nodeStatus),
-		"nodesStatus":  nodeStatus,
+		"healthyNodes": nodesStatus.HealthyCount,
+		"totalNodes":   nodesStatus.TotalCount,
+		"nodes":        nodesStatus.Nodes,
 	})
 }
 
@@ -290,11 +288,9 @@ func (s *CoordinatorServer) handleNodesStatus(c *gin.Context) {
 		return
 	}
 	
-	nodeStatus := clientManager.GetAllNodesHealth()
+	nodesStatus := clientManager.GetAllNodesHealth()
 	
-	c.JSON(http.StatusOK, gin.H{
-		"nodes": nodeStatus,
-	})
+	c.JSON(http.StatusOK, nodesStatus)
 }
 
 

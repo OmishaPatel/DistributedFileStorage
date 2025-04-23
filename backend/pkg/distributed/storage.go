@@ -83,37 +83,112 @@ func (ds *DistributedStorage) Upload(file io.Reader, filename string) (string, e
 		return "", fmt.Errorf("failed to split file: %v", err)
 	}
 
+	// Track any upload errors for reporting
+	var uploadErrors []error
+	
+	// Track failed servers to avoid retrying them
+	failedServers := make(map[string]bool)
+	
 	for i, chunkReader := range chunks {
-		serverID := selectServer(i, 4)
-		client, err := ds.clientManager.GetClient(serverID)
-		if err != nil {
-			return "", fmt.Errorf("failed to get client for server %s: %w", serverID, err)
-		}
+		// Try to upload the chunk with retries on different servers if needed
+		chunkUploaded := false
+		var lastError error
+		
+		// Try each server, starting with the preferred one
+		for retryCount := 0; retryCount < 4 && !chunkUploaded; retryCount++ {
+			// Select initial server using round-robin
+			initialServerID := selectServer(i, 4)
+			
+			// For retries, try different servers in sequence
+			serverID := selectServer((i + retryCount) % 4, 4)
+			
+			// Skip servers we already know have failed
+			if failedServers[serverID] {
+				log.Printf("Skipping known failed server %s for chunk %d", serverID, i)
+				continue
+			}
+			
+			if retryCount > 0 {
+				log.Printf("Retrying chunk %d upload on alternate server %s (attempt %d)", 
+					i, serverID, retryCount+1)
+			}
+			
+			client, err := ds.clientManager.GetClient(serverID)
+			if err != nil {
+				log.Printf("WARNING: Failed to get client for server %s: %v", serverID, err)
+				failedServers[serverID] = true
+				lastError = err
+				continue
+			}
 
-		chunkID := generateChunkID(fileID, i)
+			// Check server health first
+			if err := client.HealthCheck(); err != nil {
+				log.Printf("WARNING: Server %s failed health check: %v", serverID, err)
+				failedServers[serverID] = true
+				lastError = err
+				continue
+			}
 
-		// Upload chunk to selected server using the client
-		err = client.UploadChunk(chunkID, chunkReader)
-		if err != nil {
-			// TODO: Implement rollback/cleanup on partial failure?
-			return "", fmt.Errorf("failed to upload chunk %d (%s) to server %s: %w", i, chunkID, serverID, err)
-		}
+			chunkID := generateChunkID(fileID, i)
 
-		// Add chunk metadata
-		chunkMeta := chunk.ChunkMetadata{
-			ChunkID:       chunkID,
-			ServerID:      serverID,
-			ChunkSize:     int64(ds.chunkManager.GetChunkSize()),
-			ChunkIndex:    i,
-			ServerAddress: util.GetServerAddress(serverID), // Keep for now, might remove later
+			// Upload chunk to selected server
+			err = client.UploadChunk(chunkID, chunkReader)
+			if err != nil {
+				log.Printf("WARNING: Failed to upload chunk %d to server %s: %v", i, serverID, err)
+				failedServers[serverID] = true
+				lastError = err
+				continue
+			}
+			
+			// If we get here, the chunk was uploaded successfully
+			chunkUploaded = true
+			
+			// Add chunk metadata
+			chunkMeta := chunk.ChunkMetadata{
+				ChunkID:       chunkID,
+				ServerID:      serverID,
+				ChunkSize:     int64(ds.chunkManager.GetChunkSize()),
+				ChunkIndex:    i,
+				ServerAddress: util.GetServerAddress(serverID),
+			}
+			metadata.Chunks = append(metadata.Chunks, chunkMeta)
+			
+			// Log success or server change
+			if initialServerID != serverID {
+				log.Printf("Successfully uploaded chunk %d to alternate server %s (original %s was down)",
+					i, serverID, initialServerID)
+			}
 		}
-		metadata.Chunks = append(metadata.Chunks, chunkMeta)
+		
+		// If we couldn't upload this chunk after all retries
+		if !chunkUploaded {
+			errorMsg := fmt.Sprintf("Failed to upload chunk %d after trying all available servers", i)
+			log.Printf("ERROR: %s", errorMsg)
+			uploadErrors = append(uploadErrors, fmt.Errorf(errorMsg+": %w", lastError))
+		}
+	}
+	
+	// Check if we had any failures
+	if len(uploadErrors) > 0 {
+		// We need to decide: fail the entire upload or accept partial success?
+		// For now, we'll fail if any chunk failed
+		log.Printf("ERROR: Upload of %s failed with %d chunk failures", filename, len(uploadErrors))
+		
+		// TODO: Implement cleanup for partial uploads
+		// This would involve removing any chunks that were successfully uploaded
+		// before returning the error
+		
+		return "", fmt.Errorf("upload failed: %d/%d chunks could not be uploaded: %v", 
+			len(uploadErrors), len(chunks), uploadErrors[0])
 	}
 
 	// Store metadata for the new version
 	if err := ds.metadataService.StoreMetadata(metadata); err != nil {
 		return "", fmt.Errorf("failed to store metadata for version %d: %w", newVersion, err)
 	}
+	
+	log.Printf("Successfully uploaded %s (version %d) with %d chunks", 
+		filename, newVersion, len(chunks))
 	return fileID, nil // Return the fileID of the *newly uploaded version*
 }
 
