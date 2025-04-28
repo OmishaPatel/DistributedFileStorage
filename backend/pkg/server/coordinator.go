@@ -2,6 +2,7 @@ package server
 
 import (
 	"backend/pkg/distributed"
+	"backend/pkg/logging"
 	"backend/pkg/metadata"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 )
 
 type CoordinatorServer struct {
@@ -21,19 +23,56 @@ type CoordinatorServer struct {
 	distStorage *distributed.DistributedStorage
 	serverID string
 	metadataService metadata.MetadataService
+	logger *logging.Logger
 }
 
-func NewCoordinatorServer(config CoordinatorConfig) (*CoordinatorServer, error) {
+func NewCoordinatorServer(config CoordinatorConfig) (*CoordinatorServer,  error) {
 	if config.DistributedStorage == nil {
 		return nil, errors.New("distributed storage is required for coordinator server")
 	}
-
+	// Create dedicated logger for coordinator server
+	// Use parent's logger's path if provided
+	var logPath string
+	parentLogger := config.Logger
+	if parentLogger != nil {
+		for _,path := range parentLogger.GetOutputPaths() {
+			if filepath.Ext(path) == ".log" {
+				dir := filepath.Dir(path)
+				logPath = filepath.Join(dir, "..",
+				"distributed-coordinator-server",
+				"distributed-coordinator-server.log")
+				break
+			}
+		}
+	}
+	outputPaths := []string{"stdout"}
+	if logPath != "" {
+		outputPaths = append(outputPaths, logPath)
+	}
+	
+	distLogger, err := logging.GetLogger(logging.LogConfig{
+		ServiceName: "distributed-coordinator-server",
+		LogLevel: "info",
+		OutputPaths: outputPaths,
+		Development: true,
+	})
+	if err != nil {
+		log.Printf("Error creating distributed coordinator server logger: %v, using standard log", err)
+		minimalLogger, _ := logging.GetLogger(logging.LogConfig{
+			ServiceName: "distributed-coordinator-server",
+			LogLevel: "info",
+			OutputPaths: []string{"stdout"},
+		})
+		distLogger = minimalLogger
+	}
+	
 
 	server := &CoordinatorServer{
 		router: gin.Default(),
 		distStorage: config.DistributedStorage,
 		metadataService: config.MetadataService,
 		serverID: config.ServerID,
+		logger: distLogger,
 	}
 
 	server.setupRoutes()
@@ -58,28 +97,32 @@ func (s *CoordinatorServer) handleUploadFile(c *gin.Context) {
 	file, err := c.FormFile("file")
 
 	if err != nil {
-		log.Printf("ERROR: Bad request when uploading file: %v", err)
+		s.logger.Error("Bad request when uploading file", zap.Error(err))
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 	
 	sanitizedFileName := sanitizeFileName(file.Filename)
-	log.Printf("Processing upload request for file: %s", sanitizedFileName)
+	s.logger.Info("Processing upload request", zap.String("filename", sanitizedFileName))
 	
 	src, err := file.Open()
 	if err != nil {
-		log.Printf("ERROR: Failed to open uploaded file %s: %v", sanitizedFileName, err)
+		s.logger.Error("Failed to open uploaded file", 
+			zap.String("filename", sanitizedFileName), 
+			zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
 	defer src.Close()
 
-	log.Printf("Starting distributed upload for file: %s", sanitizedFileName)
+	s.logger.Info("Starting distributed upload", zap.String("filename", sanitizedFileName))
 	fileID, err := s.distStorage.Upload(src, sanitizedFileName)
 
 	if err != nil {
-		log.Printf("ERROR: Distributed upload failed for %s: %v", sanitizedFileName, err)
+		s.logger.Error("Distributed upload failed", 
+			zap.String("filename", sanitizedFileName), 
+			zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": fmt.Sprintf("Upload failed: %v", err),
 			"detail": err.Error(),
@@ -87,7 +130,9 @@ func (s *CoordinatorServer) handleUploadFile(c *gin.Context) {
 		return
 	}
 	
-	log.Printf("SUCCESS: Distributed upload completed for %s, fileID: %s", sanitizedFileName, fileID)
+	s.logger.Info("Distributed upload completed", 
+		zap.String("filename", sanitizedFileName), 
+		zap.String("fileID", fileID))
 	c.JSON(http.StatusOK, gin.H{
 		"message":    "File uploaded successfully",
 		"fileID":     fileID,
@@ -108,15 +153,21 @@ func (s *CoordinatorServer) handleDownloadFile(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid version number format"})
 			return
 		}
-		log.Printf("Attempting to download version %d of file '%s'", version, filename)
+		s.logger.Info("Attempting to download specific version", 
+			zap.String("filename", filename),
+			zap.Int("version", version))
 	} else {
-		log.Printf("Attempting to download latest version of file '%s'", filename)
+		s.logger.Info("Attempting to download latest version", 
+			zap.String("filename", filename))
 	}
 
 	// Download the file using the updated interface
 	fileData, err := s.distStorage.Download(filename, version)
 	if err != nil {
-		log.Printf("Error downloading file '%s' (version %d): %v", filename, version, err)
+		s.logger.Error("Error downloading file", 
+			zap.String("filename", filename), 
+			zap.Int("version", version), 
+			zap.Error(err))
 		
 		// Check for specific error types
 		if errors.Is(err, os.ErrNotExist) {
@@ -141,7 +192,8 @@ func (s *CoordinatorServer) handleDownloadFile(c *gin.Context) {
 	meta, err := s.distStorage.GetMetadataByFilename(filename)
 	if err != nil {
 		// We have the file data but not the metadata, this is strange but can still serve the file
-		log.Printf("Warning: File data available but metadata missing for '%s'", filename)
+		s.logger.Warn("File data available but metadata missing", 
+			zap.String("filename", filename))
 		downloadFilename := filename
 		c.Header("Content-Disposition", "attachment; filename="+downloadFilename)
 	} else {
@@ -159,25 +211,34 @@ func (s *CoordinatorServer) handleDownloadFile(c *gin.Context) {
 
 func (s *CoordinatorServer) handleDeleteFile(c *gin.Context) {
 	filename := c.Param("filename")
-	log.Printf("[%s] Received request to delete: %s", s.serverID, filename)
+	s.logger.Info("Received delete request", 
+		zap.String("filename", filename), 
+		zap.String("serverID", s.serverID))
 
 	err := s.distStorage.Delete(filename)
 
 	if err != nil {
 		// If the error is os.ErrNotExist, treat it as success (idempotent delete)
 		if errors.Is(err, os.ErrNotExist) {
-			log.Printf("[%s] Delete request: %s not found (already deleted?), treating as success.", s.serverID, filename)
+			s.logger.Info("Delete request for non-existent file treated as success", 
+				zap.String("filename", filename), 
+				zap.String("serverID", s.serverID))
 			c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("%s not found or already deleted", filename)})
 			return
 		}
 		// Log and return other errors as Internal Server Error
-		log.Printf("[%s] Error deleting %s: %v", s.serverID, filename, err)
+		s.logger.Error("Error deleting file", 
+			zap.String("filename", filename), 
+			zap.String("serverID", s.serverID), 
+			zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to delete %s: %v", filename, err)})
 		return
 	}
-		log.Printf("[%s] Successfully deleted: %s", s.serverID, filename)
+	
+	s.logger.Info("Successfully deleted file", 
+		zap.String("filename", filename), 
+		zap.String("serverID", s.serverID))
 	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("%s deleted successfully", filename)})
-
 }
 
 func (s *CoordinatorServer) handleListFiles(c *gin.Context) {
@@ -185,6 +246,7 @@ func (s *CoordinatorServer) handleListFiles(c *gin.Context) {
 	fileInfos, err := s.distStorage.GetAllMetadata()
 
 	if err != nil {
+		s.logger.Error("Failed to retrieve file list", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to retrieve file list: %v", err)})
 		return
 	}
@@ -212,7 +274,9 @@ func (s *CoordinatorServer) handleHealthCheck(c *gin.Context) {
 
 // Run starts the server on the specified address
 func (s *CoordinatorServer) Run(addr string) error {
-	log.Printf("Starting Coordinator Server (ID: %s) on %s", s.serverID, addr)
+	s.logger.Info("Starting Coordinator Server", 
+		zap.String("serverID", s.serverID), 
+		zap.String("address", addr))
 	return s.router.Run(addr)
 }
 
@@ -230,6 +294,7 @@ func (s *CoordinatorServer) handleSystemHealth(c *gin.Context) {
 	// Get the client manager from distributed storage
 	clientManager := distStorage.GetClientManager()
 	if clientManager == nil {
+		s.logger.Error("Unable to access client manager for health check")
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"status":  "error",
 			"message": "Unable to access client manager",
@@ -260,6 +325,7 @@ func (s *CoordinatorServer) handleNodesStatus(c *gin.Context) {
 	// Get the client manager
 	clientManager := distStorage.GetClientManager()
 	if clientManager == nil {
+		s.logger.Error("Unable to access client manager for node status")
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"status":  "error",
 			"message": "Unable to access client manager",

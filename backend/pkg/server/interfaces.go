@@ -2,6 +2,7 @@ package server
 
 import (
 	"backend/pkg/distributed"
+	"backend/pkg/logging"
 	"backend/pkg/metadata"
 	"backend/pkg/models"
 	"backend/pkg/storage"
@@ -19,12 +20,14 @@ type CoordinatorConfig struct {
 	ServerID string
 	DistributedStorage *distributed.DistributedStorage
 	MetadataService metadata.MetadataService
+	Logger *logging.Logger
 }
 
 type StorageNodeConfig struct {
 	ServerID string
 	UploadDir string
 	Storage storage.FileStorage
+	Logger *logging.Logger
 }
 
 // Common utility functions

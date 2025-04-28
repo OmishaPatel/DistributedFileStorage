@@ -3,23 +3,65 @@ package main
 import (
 	"flag"
 	"log"
+	"os"
+	"path/filepath"
+
+	"backend/pkg/logging"
 	"backend/pkg/server"
+
+	"go.uber.org/zap"
 )
 
 func main() {
 	port := flag.String("port", "8081", "Port to run the server on")
 	uploadDir := flag.String("upload-dir", "./fileStorage/server1", "Directory to store uploaded files")
 	flag.Parse()
+
+	// Ensure the logs directory exists
+		projectRoot := filepath.Join("..", "..", "..", "..")  // Go up from backend/cmd/server to project root
+	logDir := filepath.Join(projectRoot, "logs", "storage-node")
+
+	err := os.MkdirAll(logDir, 0755)
+	if err != nil {
+		log.Fatalf("Failed to create log directory: %v", err)
+	}
+
+	// Create logger for this storage node
+	logConfig := logging.LogConfig{
+		ServiceName: "individual-http-server1",
+		LogLevel:    "debug", // Use debug level to capture more details
+		OutputPaths: []string{
+			"stdout",
+			filepath.Join(logDir, "individual-http-server1.log"),
+		},
+		Development: true,
+	}
+
+	logger, err := logging.GetLogger(logConfig)
+	if err != nil {
+		log.Fatalf("Failed to initialize logger: %v", err)
+	}
+	defer logger.Close()
+
+	// Log startup information
+	logger.Info("Starting Storage Node Server",
+		zap.String("serverID", "server1"),
+		zap.String("port", *port),
+		zap.String("uploadDir", *uploadDir))
+
+	// Create storage node server with logger
 	srv, err := server.NewStorageNodeServer(server.StorageNodeConfig{
-    ServerID: "server1",
-    UploadDir: *uploadDir,
-})
+		ServerID:  "server1",
+		UploadDir: *uploadDir,
+		Logger:    logger,
+	})
 
 	if err != nil {
-		log.Fatalf("Failed to create server: %v", err)
+		logger.Fatal("Failed to create server", zap.Error(err))
 	}
-	log.Printf("Server 1 started on port %s", *port)
-	if err:= srv.Run(":" + *port); err != nil {
-		log.Fatalf("Failed to start server: %v", err)
+
+	logger.Info("Server 1 started and listening", zap.String("port", *port))
+	if err := srv.Run(":" + *port); err != nil {
+		logger.Fatal("Failed to start server", zap.Error(err))
 	}
 }

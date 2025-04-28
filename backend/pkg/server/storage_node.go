@@ -7,10 +7,13 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 
+	"backend/pkg/logging"
 	"backend/pkg/storage"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 )
 
 // StorageNodeServer handles chunk storage operations for a single node
@@ -20,16 +23,68 @@ type StorageNodeServer struct {
 	storage   storage.FileStorage
 	serverID  string
 	uploadDir string
+	logger    *logging.Logger
 }
 
 // NewStorageNodeServer creates a new storage node server instance
 func NewStorageNodeServer(config StorageNodeConfig) (*StorageNodeServer, error) {
 	var localStorage storage.FileStorage
 	var err error
+	var nodeLogger *logging.Logger
 
 	if config.Storage == nil {
-		// Create local storage if not provided
-		localStorage, err = storage.NewLocalStorage(config.UploadDir)
+		// Create local storage if not provided with a server-specific logger
+		// First, create the node's logger to pass to storage
+		if config.Logger != nil {
+			// Create a new logger with the parent logger's configuration but our own service name
+			var logPath string
+			for _, path := range config.Logger.GetOutputPaths() {
+				if filepath.Ext(path) == ".log" {
+					dir := filepath.Dir(path)
+					// Use the same pattern as coordinator.go
+					logPath = filepath.Join(dir, "..",
+						"storage-node",
+						fmt.Sprintf("individual-http-handler-%s.log", config.ServerID))
+					break
+				}
+			}
+
+			outputPaths := []string{"stdout"}
+			if logPath != "" {
+				outputPaths = append(outputPaths, logPath)
+			}
+
+			newLogger, err := logging.GetLogger(logging.LogConfig{
+				ServiceName: "individual-http-handler-" + config.ServerID,
+				LogLevel:    "info", 
+				OutputPaths: outputPaths,
+				Development: true,
+			})
+			
+			if err != nil {
+				// Fall back to standard logging if logger creation fails
+				log.Printf("Error creating logger for storage node %s: %v", config.ServerID, err)
+			} else {
+				nodeLogger = newLogger
+			}
+		}
+
+		if nodeLogger == nil {
+			// No parent logger provided or failed to create, create minimal logger
+			defaultLogger, _ := logging.GetLogger(logging.LogConfig{
+				ServiceName: "individual-http-handler-" + config.ServerID,
+				LogLevel:    "info",
+				OutputPaths: []string{"stdout"},
+			})
+			nodeLogger = defaultLogger
+		}
+
+		// Now create storage with this logger and server ID
+		localStorage, err = storage.NewLocalStorageWithLogger(
+			config.UploadDir, 
+			nodeLogger,
+			config.ServerID,
+		)
 		if err != nil {
 			return nil, err
 		}
@@ -42,6 +97,7 @@ func NewStorageNodeServer(config StorageNodeConfig) (*StorageNodeServer, error) 
 		storage:   localStorage,
 		serverID:  config.ServerID,
 		uploadDir: config.UploadDir,
+		logger:    nodeLogger,
 	}
 
 	server.setupRoutes()
@@ -62,6 +118,7 @@ func (s *StorageNodeServer) setupRoutes() {
 func (s *StorageNodeServer) handleChunkUpload(c *gin.Context) {
 	file, err := c.FormFile("file")
 	if err != nil {
+		s.logger.Error("Bad request when uploading chunk", zap.Error(err))
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -70,6 +127,9 @@ func (s *StorageNodeServer) handleChunkUpload(c *gin.Context) {
 	chunkID := file.Filename
 	src, err := file.Open()
 	if err != nil {
+		s.logger.Error("Failed to open uploaded chunk", 
+			zap.String("chunkID", chunkID), 
+			zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -78,11 +138,17 @@ func (s *StorageNodeServer) handleChunkUpload(c *gin.Context) {
 	// Store the chunk in local storage
 	filePath, err := s.storage.Upload(src, chunkID)
 	if err != nil {
+		s.logger.Error("Failed to store chunk", 
+			zap.String("chunkID", chunkID), 
+			zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	log.Printf("[%s] Stored chunk %s at %s", s.serverID, chunkID, filePath)
+	s.logger.Info("Stored chunk successfully", 
+		zap.String("chunkID", chunkID), 
+		zap.String("path", filePath), 
+		zap.String("serverID", s.serverID))
 	c.JSON(http.StatusOK, gin.H{
 		"message":  "Chunk uploaded successfully",
 		"chunkID":  chunkID,
@@ -94,14 +160,23 @@ func (s *StorageNodeServer) handleChunkUpload(c *gin.Context) {
 // handleChunkDownload serves individual chunks back to the coordinator
 func (s *StorageNodeServer) handleChunkDownload(c *gin.Context) {
 	chunkID := c.Param("chunkID")
-	log.Printf("[%s] Received request to download chunk: %s", s.serverID, chunkID)
+	s.logger.Info("Received download request", 
+		zap.String("chunkID", chunkID), 
+		zap.String("serverID", s.serverID))
 
 	// Simple direct chunk serving - no metadata or versioning concerns
 	reader, err := s.storage.Download(chunkID)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			s.logger.Warn("Chunk not found", 
+				zap.String("chunkID", chunkID), 
+				zap.String("serverID", s.serverID))
 			c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("Chunk %s not found", chunkID)})
 		} else {
+			s.logger.Error("Failed to read chunk", 
+				zap.String("chunkID", chunkID), 
+				zap.String("serverID", s.serverID), 
+				zap.Error(err))
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to read chunk: %v", err)})
 		}
 		return
@@ -114,30 +189,42 @@ func (s *StorageNodeServer) handleChunkDownload(c *gin.Context) {
 	// Stream the chunk directly to response
 	_, err = io.Copy(c.Writer, reader)
 	if err != nil {
-		log.Printf("[%s] Error streaming chunk %s: %v", s.serverID, chunkID, err)
+		s.logger.Error("Error streaming chunk", 
+			zap.String("chunkID", chunkID), 
+			zap.String("serverID", s.serverID), 
+			zap.Error(err))
 	}
 }
 
 // handleChunkDelete handles individual chunk deletion
 func (s *StorageNodeServer) handleChunkDelete(c *gin.Context) {
 	chunkID := c.Param("chunkID")
-	log.Printf("[%s] Received request to delete chunk: %s", s.serverID, chunkID)
+	s.logger.Info("Received delete request", 
+		zap.String("chunkID", chunkID), 
+		zap.String("serverID", s.serverID))
 
 	err := s.storage.Delete(chunkID)
 	if err != nil {
 		// If the error is os.ErrNotExist, treat it as success (idempotent delete)
 		if errors.Is(err, os.ErrNotExist) {
-			log.Printf("[%s] Delete request: chunk %s not found, treating as success.", s.serverID, chunkID)
+			s.logger.Info("Delete request for non-existent chunk treated as success", 
+				zap.String("chunkID", chunkID), 
+				zap.String("serverID", s.serverID))
 			c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("Chunk %s not found or already deleted", chunkID)})
 			return
 		}
 		
-		log.Printf("[%s] Error deleting chunk %s: %v", s.serverID, chunkID, err)
+		s.logger.Error("Error deleting chunk", 
+			zap.String("chunkID", chunkID), 
+			zap.String("serverID", s.serverID), 
+			zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to delete chunk %s: %v", chunkID, err)})
 		return
 	}
 	
-	log.Printf("[%s] Successfully deleted chunk: %s", s.serverID, chunkID)
+	s.logger.Info("Successfully deleted chunk", 
+		zap.String("chunkID", chunkID), 
+		zap.String("serverID", s.serverID))
 	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("Chunk %s deleted successfully", chunkID)})
 }
 
@@ -153,6 +240,9 @@ func (s *StorageNodeServer) handleHealthCheck(c *gin.Context) {
 
 // Run starts the server on the specified address
 func (s *StorageNodeServer) Run(addr string) error {
-	log.Printf("Starting Storage Node Server (ID: %s) on %s - for handling chunk operations", s.serverID, addr)
+	s.logger.Info("Starting Storage Node Server", 
+		zap.String("serverID", s.serverID), 
+		zap.String("address", addr), 
+		zap.String("directory", s.uploadDir))
 	return s.router.Run(addr)
 }
