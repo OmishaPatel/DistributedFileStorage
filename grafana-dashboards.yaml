@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: 'Distributed Storage'
+    orgId: 1
+    folder: 'Distributed Storage'
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /var/lib/grafana/dashboards 
