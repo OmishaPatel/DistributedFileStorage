@@ -7,6 +7,7 @@ import (
 	"log"
 	"math"
 	"sort"
+	"time"
 )
 
 const (
@@ -105,6 +106,11 @@ type ChunkMetadata struct {
 	ChunkSize     int64  `json:"chunk_size"`
 	ChunkIndex    int    `json:"chunk_index"`
 	ServerAddress string `json:"server_address"`
+	Version       int    `json:"version"`
+	PrimaryNode   string `json:"primary_node"`
+	ReplicaNodes  []string `json:"replica_nodes"`
+	LastModified int64 `json:"last_modified"`
+	Checksum      string `json:"checksum"`
 }
 
 // Optional: Add a constructor for convenience
@@ -115,5 +121,10 @@ func NewChunkMetadata(chunkID, serverID string, size int64, index int, address s
 		ChunkSize:     size,
 		ChunkIndex:    index,
 		ServerAddress: address,
+		Version:       1,
+		PrimaryNode: serverID,
+		ReplicaNodes: []string{},
+		LastModified: time.Now().Unix(),
+		Checksum:     "",
 	}
 }
