@@ -3,6 +3,8 @@ package httpclient
 import (
 	"fmt"
 	"net/http"
+	// "net/url"
+	// "strings"
 	"sync"
 	"time"
 )
@@ -48,6 +50,14 @@ func NewClientManager(config ClientConfig) ClientManagerInterface {
 		MaxIdleConnsPerHost: config.MaxIdleConnsPerHost,
 		IdleConnTimeout:     90 * time.Second,
 		TLSHandshakeTimeout: 10 * time.Second,
+		// Add proxy configuration for server1
+		// Proxy: func(req *http.Request) (*url.URL, error) {
+		// 	// Check if this is a request to server1
+		// 	if strings.Contains(req.URL.Host, "localhost:8081") {
+		// 		return url.Parse("http://localhost:9081")
+		// 	}
+		// 	return nil, nil // No proxy for other servers
+		// },
 	}
 	
 	client := &http.Client{

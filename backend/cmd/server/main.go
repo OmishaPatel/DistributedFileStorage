@@ -126,7 +126,7 @@ func main() {
 // 		ds.StopHealthMonitoring()
 		
 // 		// Close loggers
-// 		logging.Shutdown()
+// 		logging.CloseAllLoggers()// add correct method here
 		
 // 		os.Exit(0)
 // 	}()
