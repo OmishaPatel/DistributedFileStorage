@@ -18,14 +18,12 @@ type ReplicationConfig struct {
 	ReplicationFactor int `json:"replication_factor"`
 	WriteQuorum int `json:"write_quorum"`
 	ReadQuorum int `json:"read_quorum"`
-	HealthCheckInterval time.Duration `json:"health_check_interval"`
 }
 
 type ReplicationManager interface{
 	SelectReplicationNodes(chunkID string) (primary string, replicas []string, err error)
 	UpdateReplicationStatus(chunkID string, status ReplicationStatus) error
 	GetReplicationStatus(chunkID string) (ReplicationStatus, error)
-	CheckReplicationHealth()([]ReplicationStatus, error)
 	ResolveConflicts(chunkID string) error
 }
 

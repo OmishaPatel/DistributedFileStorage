@@ -17,6 +17,7 @@ type ReplicationHandler struct {
 	clientMgr httpclient.ClientManagerInterface
 	logger *zap.Logger
 	config ReplicationConfig
+	statusStore *StatusStore
 }
 var _ ReplicationManager = (*ReplicationHandler)(nil)
 func NewReplicationHandler(clientMgr httpclient.ClientManagerInterface, logger *zap.Logger, config ReplicationConfig) *ReplicationHandler {
@@ -24,6 +25,7 @@ func NewReplicationHandler(clientMgr httpclient.ClientManagerInterface, logger *
 		clientMgr: clientMgr,
 		logger: logger,
 		config: config,
+		statusStore: NewStatusStore(),
 	}
 }
 
@@ -104,11 +106,21 @@ func (h *ReplicationHandler) ReplicatedUpload(chunkID string, data io.Reader, me
 		Version: int64(metadata.Version),
 		PrimaryNode: primary,
 		ReplicaNodes: successfulReplicas,
-		Status: "healthy",
+		Status: "replicated",
 		LastChecked: time.Now(),
 	}
-	if err := h.UpdateReplicationStatus(chunkID, status); err != nil {
-		h.logger.Error("Failed to update replication status", zap.Error(err))
+	if err != nil {
+		status = ReplicationStatus{
+		ChunkID: chunkID,
+		Version: int64(metadata.Version),
+		PrimaryNode: primary,
+		ReplicaNodes: successfulReplicas,
+		Status: "failed",
+		LastChecked: time.Now(),
+		}
+	}
+	if updateErr := h.UpdateReplicationStatus(chunkID, status); updateErr != nil {
+		h.logger.Error("Failed to update replication status", zap.Error(updateErr))
 	}
 	h.logger.Info("Sucessfully replicated chunk",
 		zap.String("chunkID", chunkID),
@@ -120,11 +132,6 @@ func (h *ReplicationHandler) ReplicatedUpload(chunkID string, data io.Reader, me
 	return nil
 }
 
-
-func (h *ReplicationHandler) CheckReplicationHealth() ([]ReplicationStatus, error) {
-    // TODO: Implement health check logic
-    return []ReplicationStatus{}, nil
-}
 func (h *ReplicationHandler) ResolveConflicts(chunkID string) error {
     // TODO: Implement conflict resolution logic
     return nil
@@ -143,11 +150,19 @@ func (h *ReplicationHandler) SelectReplicationNodes(chunkID string) (string, []s
 }
 
 func (h *ReplicationHandler) UpdateReplicationStatus(chunkID string, status ReplicationStatus) error {
-    // TODO: Implement status update logic
-    return nil
+	h.statusStore.Update(chunkID, status)
+    h.logger.Info("Replication status update",
+        zap.String("chunkID", chunkID),
+        zap.String("status", status.Status),
+        zap.String("primaryNode", status.PrimaryNode),
+        zap.Strings("replicaNodes", status.ReplicaNodes))
+	return nil
 }
 
 func (h *ReplicationHandler) GetReplicationStatus(chunkID string) (ReplicationStatus, error) {
-    // TODO: Implement status retrieval logic
-    return ReplicationStatus{}, nil
+    status, exists := h.statusStore.Get(chunkID)
+	if !exists {
+		return ReplicationStatus{}, fmt.Errorf("no replicationstatus found for chunkID: %s", chunkID)
+	}
+	return status, nil
 }
