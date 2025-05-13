@@ -131,11 +131,209 @@ func (h *ReplicationHandler) ReplicatedUpload(chunkID string, data io.Reader, me
 
 	return nil
 }
+ func(h *ReplicationHandler) ReplicatedDownload(chunkID string) (io.ReadCloser, error) {
+	status, err := h.GetReplicationStatus(chunkID)
 
-func (h *ReplicationHandler) ResolveConflicts(chunkID string) error {
-    // TODO: Implement conflict resolution logic
-    return nil
-}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get replication status: %w", err)
+	}
+	// read from primary node
+	primaryClient, err := h.clientMgr.GetClient(status.PrimaryNode)
+	if err != nil {
+		h.logger.Warn("Failed to get primary client, trying replicas",
+			zap.String("chunkID", chunkID),
+			zap.String("primaryNode", status.PrimaryNode),
+			zap.Error(err))
+	} else {
+		// primary
+		reader, err := primaryClient.DownloadChunk(chunkID)
+		if err == nil {
+			h.logger.Info("Sucessfully read from primary",
+				zap.String("chunkID", chunkID),
+				zap.String("primaryNode", status.PrimaryNode))
+			return reader, nil
+		}
+		h.logger.Warn("Failed to read from primary, trying replicas",
+			zap.String("chunkID", chunkID),
+			zap.String("primaryNode", status.PrimaryNode),
+			zap.Error(err))
+	}
+
+	// read from replicas
+	var wg sync.WaitGroup
+	resultChan := make(chan io.ReadCloser, len(status.ReplicaNodes))
+	errChan := make(chan error, len(status.ReplicaNodes))
+
+	for _,replica := range status.ReplicaNodes {
+		wg.Add(1)
+		go func(node string) {
+			defer wg.Done()
+
+			replicaClient, err := h.clientMgr.GetClient(node)
+			if err != nil {
+				errChan <- fmt.Errorf("failed to get replica client for %s: %w", node, err)
+				return
+			}
+			reader, err := replicaClient.DownloadChunk(chunkID)
+			if err != nil {
+				errChan <- fmt.Errorf("failed to read from replica %s: %w", node, err)
+				return
+			}
+			resultChan <- reader
+		}(replica)
+	}
+	wg.Wait()
+	close(resultChan)
+	close(errChan)
+
+	//successful reads
+	var successfulReads int
+	var firstReader io.ReadCloser
+	var successfulNodes []string
+
+	for reader := range resultChan {
+		successfulReads++
+		if firstReader == nil {
+			firstReader = reader
+		}
+		successfulNodes = append(successfulNodes, status.ReplicaNodes[successfulReads-1])
+	}
+
+	//if multiple successful reads, verify consistency
+	if successfulReads > 1 {
+		go h.verifyAndRepairConsistency(chunkID, successfulNodes)
+	}
+	if successfulReads == 0 {
+		return nil, fmt.Errorf("failed to read chunk from any node")
+	}
+	return firstReader, nil
+ }
+// read replicas using primary node as source of truth
+ func (h *ReplicationHandler) repairReplicas(chunkID, primaryNode string, replicaNodes[]string) {
+	primaryClient, err := h.clientMgr.GetClient(primaryNode)
+	if err != nil {
+		h.logger.Error("Failed to get primary client for repair",
+			zap.String("chunkID", chunkID),
+			zap.String("primaryNode", primaryNode),
+			zap.Error(err))
+		return
+	}
+
+	// get data from primary
+	reader, err := primaryClient.DownloadChunk(chunkID)
+	if err != nil {
+		h.logger.Error("Failed to read from primary for repair",
+			zap.String("chunkID", chunkID),
+			zap.String("primaryNode", primaryNode),
+			zap.Error(err))
+		return
+	}
+	defer reader.Close()
+
+	// Read all data
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		h.logger.Error("Failed to read chunk data for repair",
+			zap.String("chunkID", chunkID),
+			zap.Error(err))
+		return
+	}
+
+	// Repair each replica
+	for _,replica := range replicaNodes {
+		replicaClient, err := h.clientMgr.GetClient(replica)
+		if err != nil {
+			h.logger.Error("Failed to get replica client for repair",
+				zap.String("chunkID", chunkID),
+				zap.String("replica", replica),
+				zap.Error(err))
+			continue
+		}
+
+		// Upload to replica
+		if err := replicaClient.UploadChunk(chunkID, bytes.NewReader(data)); err != nil {
+			h.logger.Error("Failed to repair replica",
+				zap.String("chunkID", chunkID),
+				zap.String("replica", replica),
+				zap.Error(err))
+			continue
+		}
+		h.logger.Info("Sucessfully repaired replica",
+			zap.String("chunkID", chunkID),
+			zap.String("replica", replica))
+	}
+ }
+
+ // verifies and repairs consistency between replicas
+ func (h *ReplicationHandler) verifyAndRepairConsistency(chunkID string, nodes[]string) {
+	if len(nodes) < 2 {
+		return
+	}
+	// get data from first node
+	firstClient, err := h.clientMgr.GetClient(nodes[0])
+	if err != nil {
+		return
+	}
+	reader, err := firstClient.DownloadChunk(chunkID)
+	if err != nil {
+		return
+	}
+	defer reader.Close()
+
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return
+	}
+
+	// Compare with other nodes
+	for _,node := range nodes[1:] {
+		client, err := h.clientMgr.GetClient(node)
+		if err != nil {
+			continue
+		}
+		nodeReader, err := client.DownloadChunk(chunkID)
+		if err != nil {
+			continue
+		}
+		defer nodeReader.Close()
+
+		nodeData, err := io.ReadAll(nodeReader)
+		if err != nil {
+			continue
+		}
+		// if data doesn't match repair the node
+		if !bytes.Equal(data, nodeData) {
+			if err := client.UploadChunk(chunkID, bytes.NewReader(data)); err != nil {
+				h.logger.Error("Failed to repair inconsistent replica",
+					zap.String("chunkID", chunkID),
+					zap.String("node", node),
+					zap.Error(err))
+				continue
+			}
+			h.logger.Info("Successfully repaired inconsistent replica",
+				zap.String("chunkID", chunkID),
+				zap.String("node", node))
+		}
+	}
+ }
+
+	// read quorum
+// 	if successfulReads < h.config.ReadQuorum {
+// 		return nil, fmt.Errorf("failed to achieve read quorum: only %d/%d successful reads", successfulReads, h.config.ReadQuorum)
+// 	}
+// 	for err := range errChan {
+// 		h.logger.Warn("Error during replica read",
+// 			zap.String("chunkID", chunkID),
+// 			zap.Error(err))
+// 	}
+// 	h.logger.Info("Sucessfully read chunk with quorum",
+// 		zap.String("chunkID", chunkID),
+// 		zap.Int("sucessfulReads", successfulReads),
+// 		zap.Int("requiredQuorum", h.config.ReadQuorum))
+// 	return firstReader, nil
+//  }
+
+
 func (h *ReplicationHandler) SelectReplicationNodes(chunkID string) (string, []string, error) {
     nodesStatus := h.clientMgr.GetAllNodesHealth()
     if nodesStatus.HealthyCount < h.config.ReplicationFactor {
