@@ -6,7 +6,7 @@ import (
 	"log"
 	"path/filepath"
 
-	httpclient "backend/internal/httpClient"
+	httpclient "backend/internal/httpclient"
 	"backend/pkg/distributed"
 	"backend/pkg/logging"
 	"backend/pkg/metadata/memstore"

@@ -15,11 +15,12 @@ import (
 	"sync"
 	"time"
 
-	httpclient "backend/internal/httpClient"
+	httpclient "backend/internal/httpclient"
 	"backend/pkg/chunk"
 	"backend/pkg/logging"
 	"backend/pkg/metadata"
 	"backend/pkg/models"
+	"backend/pkg/replication"
 	"backend/pkg/util"
 
 	"go.uber.org/zap"
@@ -33,6 +34,7 @@ type DistributedStorage struct {
 	failedServers map[string]bool
 	failedServersMutex sync.RWMutex
 	logger *logging.Logger
+	replicationHandler *replication.ReplicationHandler
 	
 	// Health monitoring
 	monitoringActive bool
@@ -80,12 +82,28 @@ func NewDistributedStorageWithClientManager(metadataService metadata.MetadataSer
 		log.Printf("Error creating distributed storage logger: %v, using standard log", err)
 		// If we can't create a logger, create a minimal one
 		minimalLogger, _ := logging.GetLogger(logging.LogConfig{
-			ServiceName: "distributed-storage",
+			ServiceName: "distributed-coordinator-service",
 			LogLevel:    "info",
 			OutputPaths: []string{"stdout"},
 		})
 		distLogger = minimalLogger
 	}
+	// Replication
+	replicationConfig := replication.ReplicationConfig{
+		ReplicationFactor: 3,
+		WriteQuorum: 2,
+		ReadQuorum: 2,
+	}
+		
+	replicationProjectRoot := filepath.Join("..", "..", "..", "..") 
+	 // Go up from backend/cmd/server to project root
+	replicationlogDir := filepath.Join(replicationProjectRoot, "logs", "replication-handler")
+	replicationHandler := replication.NewReplicationHandler(
+		clientManager,
+		replicationConfig,
+		replicationlogDir,
+
+	)
 
 	ds := &DistributedStorage{
 		clientManager:      clientManager,
@@ -95,6 +113,7 @@ func NewDistributedStorageWithClientManager(metadataService metadata.MetadataSer
 		failedServersMutex: sync.RWMutex{},
 		logger:             distLogger,
 		healthCheckInterval: 30 * time.Second, // Default 30-second interval
+		replicationHandler: replicationHandler,
 	}
 	
 	// Start health monitoring
@@ -224,27 +243,27 @@ func (ds *DistributedStorage) checkAllServersHealth() {
 }
 
 // Modify the selectServer function to be aware of failed servers
-func (ds *DistributedStorage) selectHealthyServer(chunkIndex int) (string, error) {
-	ds.failedServersMutex.RLock()
-    defer ds.failedServersMutex.RUnlock()
-	// Get the list of available servers (not in failedServers)
-	availableServers := []string{}
-	for i := 1; i <= 4; i++ {
-		serverID := fmt.Sprintf("server%d", i)
-		if !ds.failedServers[serverID] {
-			availableServers = append(availableServers, serverID)
-		}
-	}
+// func (ds *DistributedStorage) selectHealthyServer(chunkIndex int) (string, error) {
+// 	ds.failedServersMutex.RLock()
+//     defer ds.failedServersMutex.RUnlock()
+// 	// Get the list of available servers (not in failedServers)
+// 	availableServers := []string{}
+// 	for i := 1; i <= 4; i++ {
+// 		serverID := fmt.Sprintf("server%d", i)
+// 		if !ds.failedServers[serverID] {
+// 			availableServers = append(availableServers, serverID)
+// 		}
+// 	}
 	
-	// If no servers available, return error
-	if len(availableServers) == 0 {
-		return "", fmt.Errorf("no healthy servers available for upload")
-	}
+// 	// If no servers available, return error
+// 	if len(availableServers) == 0 {
+// 		return "", fmt.Errorf("no healthy servers available for upload")
+// 	}
 	
-	// Select a server using round-robin from available servers
-	selectedIndex := chunkIndex % len(availableServers)
-	return availableServers[selectedIndex], nil
-}
+// 	// Select a server using round-robin from available servers
+// 	selectedIndex := chunkIndex % len(availableServers)
+// 	return availableServers[selectedIndex], nil
+// }
 
 func (ds *DistributedStorage) Upload(file io.Reader, filename string) (string, error) {
 	// Generate unique file ID - This ID should ideally be stable across versions *or* version specific.
@@ -313,85 +332,115 @@ func (ds *DistributedStorage) Upload(file io.Reader, filename string) (string, e
 	uploadedChunks := make([]UploadedChunk, 0, len(chunks))
 	
 	// Check if we need to track which servers to use (for error handling)
-	if len(chunks) == 0 {
-		ds.logger.Warn("No chunks created for file", 
-			zap.String("filename", filename),
-			zap.Int("fileSize", len(fileBytes)))
-		return "", fmt.Errorf("no chunks were created")
-	}
+	// if len(chunks) == 0 {
+	// 	ds.logger.Warn("No chunks created for file", 
+	// 		zap.String("filename", filename),
+	// 		zap.Int("fileSize", len(fileBytes)))
+	// 	return "", fmt.Errorf("no chunks were created")
+	// }
 
 	for i, chunkData := range chunks {
 		// Generate chunk ID
 		chunkID := generateChunkID(fileID, i)
-		
-		// Select a server for this chunk
-		serverID, err := ds.selectHealthyServer(i)
-		if err != nil {
-			ds.logger.Error("Failed to select server for chunk upload", 
-				zap.String("filename", filename),
-				zap.String("chunkID", chunkID),
-				zap.Error(err))
-			
-			// Cleanup already uploaded chunks and return error
-			ds.cleanupPartialUpload(uploadedChunks, filename)
-			return "", fmt.Errorf("server selection failed: %w", err)
+		// create chunk metadata
+		metadata := &chunk.ChunkMetadata{
+			ChunkID: chunkID,
+			Version: newVersion,
+			ChunkIndex: i,
+			ChunkSize: int64(len(chunkData)),
+			LastModified: time.Now().Unix(),
+			PrimaryNode: "",
+			ReplicaNodes: []string{},
+			ServerID: "",
+			ServerAddress: "",
 		}
+		// Select a server for this chunk
+		// serverID, err := ds.selectHealthyServer(i)
+		// if err != nil {
+		// 	ds.logger.Error("Failed to select server for chunk upload", 
+		// 		zap.String("filename", filename),
+		// 		zap.String("chunkID", chunkID),
+		// 		zap.Error(err))
+			
+		// 	// Cleanup already uploaded chunks and return error
+		// 	ds.cleanupPartialUpload(uploadedChunks, filename)
+		// 	return "", fmt.Errorf("server selection failed: %w", err)
+		// }
 		
 		// Get client for this server
-		client, err := ds.clientManager.GetClient(serverID)
-		if err != nil {
-			ds.logger.Error("Failed to get client for server", 
-				zap.String("filename", filename),
-				zap.String("chunkID", chunkID),
-				zap.String("serverID", serverID),
-				zap.Error(err))
+		// client, err := ds.clientManager.GetClient(serverID)
+		// if err != nil {
+		// 	ds.logger.Error("Failed to get client for server", 
+		// 		zap.String("filename", filename),
+		// 		zap.String("chunkID", chunkID),
+		// 		zap.String("serverID", serverID),
+		// 		zap.Error(err))
 			
-			// Cleanup and return error
-			ds.cleanupPartialUpload(uploadedChunks, filename)
-			return "", fmt.Errorf("client error for server %s: %w", serverID, err)
-		}
+		// 	// Cleanup and return error
+		// 	ds.cleanupPartialUpload(uploadedChunks, filename)
+		// 	return "", fmt.Errorf("client error for server %s: %w", serverID, err)
+		// }
 		
 		// Upload the chunk - the chunk ID is the filename for the storage node
-		ds.logger.Debug("Uploading chunk", 
-			zap.String("filename", filename),
-			zap.String("chunkID", chunkID),
-			zap.String("serverID", serverID),
-			zap.Int("chunkIndex", i),
-			zap.Int("chunkSize", len(chunkData)))
+		// ds.logger.Debug("Uploading chunk", 
+		// 	zap.String("filename", filename),
+		// 	zap.String("chunkID", chunkID),
+		// 	zap.String("serverID", serverID),
+		// 	zap.Int("chunkIndex", i),
+		// 	zap.Int("chunkSize", len(chunkData)))
 		
-		err = client.UploadChunk(chunkID, bytes.NewReader(chunkData))
+		//err = client.UploadChunk(chunkID, bytes.NewReader(chunkData))
+		err := ds.replicationHandler.ReplicatedUpload(chunkID, bytes.NewReader(chunkData), metadata)
 		if err != nil {
 			ds.logger.Error("Failed to upload chunk", 
 				zap.String("filename", filename),
 				zap.String("chunkID", chunkID),
-				zap.String("serverID", serverID),
+				//zap.String("serverID", serverID),
 				zap.Error(err))
 			
 			// Mark this server as failed
-			ds.failedServersMutex.Lock()
-			ds.failedServers[serverID] = true
-			ds.failedServersMutex.Unlock()
+			// ds.failedServersMutex.Lock()
+			// ds.failedServers[serverID] = true
+			// ds.failedServersMutex.Unlock()
 			
 			// Cleanup and return error
 			ds.cleanupPartialUpload(uploadedChunks, filename)
 			return "", fmt.Errorf("chunk upload failed: %w", err)
+
+			
 		}
+		// Get replication status
+		status, err := ds.replicationHandler.GetReplicationStatus(chunkID)
+		if err != nil {
+			metadata.PrimaryNode = status.PrimaryNode
+			metadata.ReplicaNodes = status.ReplicaNodes
+			metadata.ServerID = status.PrimaryNode
+			metadata.ServerAddress = util.GetServerAddress(status.PrimaryNode)
+		}
+			uploadedChunks = append(uploadedChunks, UploadedChunk{
+				
+			
+				ChunkID: chunkID,
+				ServerID: metadata.ServerID,
+			})
+		}
+
 		
-		// Track uploaded chunk
-		uploadedChunks = append(uploadedChunks, UploadedChunk{
-			ChunkID:  chunkID,
-			ServerID: serverID,
-		})
+		// // Track uploaded chunk
+		// uploadedChunks = append(uploadedChunks, UploadedChunk{
+		// 	ChunkID:  chunkID,
+		// 	ServerID: serverID,
+		// })
 		
-		ds.logger.Debug("Chunk uploaded successfully", 
-			zap.String("filename", filename),
-			zap.String("chunkID", chunkID),
-			zap.String("serverID", serverID),
-			zap.Int("chunkIndex", i))
-	}
+		// ds.logger.Debug("Chunk uploaded successfully", 
+		// 	zap.String("filename", filename),
+		// 	zap.String("chunkID", chunkID),
+		// 	zap.String("serverID", serverID),
+		// 	zap.Int("chunkIndex", i))
+	
 
 	// Create metadata entry for this file
-	metadata := &metadata.FileMetadata{
+	fileMetadata := &metadata.FileMetadata{
 		OriginalName: filename,
 		FileID:       fileID,
 		TotalSize:    int64(len(fileBytes)),
@@ -410,11 +459,11 @@ func (ds *DistributedStorage) Upload(file io.Reader, filename string) (string, e
 			i,
 			util.GetServerAddress(uploadedChunk.ServerID),
 		)
-		metadata.Chunks = append(metadata.Chunks, chunkMetadata)
+		fileMetadata.Chunks = append(fileMetadata.Chunks, chunkMetadata)
 	}
 	
 	// Save metadata
-	err = ds.metadataService.StoreMetadata(metadata)
+	err = ds.metadataService.StoreMetadata(fileMetadata)
 	if err != nil {
 		ds.logger.Error("Failed to save metadata", 
 			zap.String("filename", filename),
@@ -465,43 +514,48 @@ func (ds *DistributedStorage) Download(filename string, version int) ([]byte, er
 	unavailableChunks := 0
 
 	for _, chunk := range chunks {
-		serverID := chunk.ServerID
+		//serverID := chunk.ServerID
 		chunkID := chunk.ChunkID
 		chunkIndex := chunk.ChunkIndex
 
 		// Check if the server is marked as failed
-		if ds.failedServers[serverID] {
-			unavailableChunks++
-			downloadErrors = append(downloadErrors, fmt.Sprintf("chunk %d unavailable: server %s is down", chunkIndex, serverID))
-			continue
-		}
+		// if ds.failedServers[serverID] {
+		// 	unavailableChunks++
+		// 	downloadErrors = append(downloadErrors, fmt.Sprintf("chunk %d unavailable: server %s is down", chunkIndex, serverID))
+		// 	continue
+		// }
 
-		// Get the client for this server
-		client, err := ds.clientManager.GetClient(serverID)
-		if err != nil {
-			unavailableChunks++
-			downloadErrors = append(downloadErrors, fmt.Sprintf("chunk %d unavailable: cannot connect to server %s", chunkIndex, serverID))
-			// Mark server as failed for future reference
-			ds.failedServers[serverID] = true
-			continue
-		}
+		// // Get the client for this server
+		// client, err := ds.clientManager.GetClient(serverID)
+		// if err != nil {
+		// 	unavailableChunks++
+		// 	downloadErrors = append(downloadErrors, fmt.Sprintf("chunk %d unavailable: cannot connect to server %s", chunkIndex, serverID))
+		// 	// Mark server as failed for future reference
+		// 	ds.failedServers[serverID] = true
+		// 	continue
+		// }
 
 		// Download the chunk
-		chunkReader, err := client.DownloadChunk(chunkID)
+		// chunkReader, err := client.DownloadChunk(chunkID)
+		// if err != nil {
+		// 	unavailableChunks++
+		// 	downloadErrors = append(downloadErrors, fmt.Sprintf("chunk %d download failed from server %s: %v", chunkIndex, serverID, err))
+			
+		// 	// Only mark the server as failed if it's an HTTP connection error, not a "not found" error
+		// 	if !strings.Contains(err.Error(), "not found") {
+		// 		ds.failedServers[serverID] = true
+		// 	}
+		// 	continue
+		// }
+		reader, err := ds.replicationHandler.ReplicatedDownload(chunkID)
 		if err != nil {
 			unavailableChunks++
-			downloadErrors = append(downloadErrors, fmt.Sprintf("chunk %d download failed from server %s: %v", chunkIndex, serverID, err))
-			
-			// Only mark the server as failed if it's an HTTP connection error, not a "not found" error
-			if !strings.Contains(err.Error(), "not found") {
-				ds.failedServers[serverID] = true
-			}
+			downloadErrors = append(downloadErrors, fmt.Sprintf("chunk %d download failed: %v", chunkIndex, err))
 			continue
 		}
-
 		// Convert ReadCloser to []byte
-		chunkData, err := io.ReadAll(chunkReader)
-		chunkReader.Close() // Don't forget to close the reader
+		chunkData, err := io.ReadAll(reader)
+		reader.Close() // Don't forget to close the reader
 		if err != nil {
 			unavailableChunks++
 			downloadErrors = append(downloadErrors, fmt.Sprintf("chunk %d read failed: %v", chunkIndex, err))
@@ -570,80 +624,123 @@ func (ds *DistributedStorage) List() ([]string, error) {
 
 func (ds *DistributedStorage) Delete(filename string) error {
 	// 1. Find metadata by filename to get FileID and chunk info
-	meta, err := ds.GetMetadataByFilename(filename)
+	// meta, err := ds.GetMetadataByFilename(filename)
+	// if err != nil {
+	// 	if errors.Is(err, os.ErrNotExist) { 
+	// 		ds.logger.Info("Delete: Metadata not found for filename, assuming already deleted", 
+	// 			zap.String("filename", filename))
+	// 		return nil // Treat as success if metadata is gone
+	// 	}
+	// 	return fmt.Errorf("failed to get metadata for delete by filename '%s': %w", filename, err)
+	// }
+	// fileID := meta.FileID
+	
+	// // 2. Convert chunk metadata to UploadedChunk format for deletion
+	// ds.logger.Info("Deleting chunks for fileID", 
+	// 	zap.String("fileID", fileID),
+	// 	zap.String("filename", filename),
+	// 	zap.Int("chunkCount", len(meta.Chunks)))
+	
+	// // Track failures for reporting
+	// var failedChunks []UploadedChunk
+	
+	// // Delete each chunk
+	// for _, chunkMeta := range meta.Chunks {
+	// 	chunk := UploadedChunk{
+	// 		ChunkID:  chunkMeta.ChunkID,
+	// 		ServerID: chunkMeta.ServerID,
+	// 	}
+		
+	// 	success := ds.attemptChunkDeletion(chunk)
+	// 	if !success {
+	// 		failedChunks = append(failedChunks, chunk)
+	// 	}
+	// }
+	
+	// // 3. Delete metadata if all chunks were deleted, or if we have acceptable failures
+	// // Define acceptable as: we tried our best and most chunks were deleted
+	// totalChunks := len(meta.Chunks)
+	// if len(failedChunks) == 0 || float64(len(failedChunks))/float64(totalChunks) < 0.25 {
+	// 	// Delete metadata if all chunks were deleted or if less than 25% failed
+	// 	ds.logger.Info("Deleting metadata for fileID", 
+	// 		zap.String("fileID", fileID),
+	// 		zap.String("filename", filename))
+	// 	if err := ds.metadataService.DeleteMetadata(fileID); err != nil {
+	// 		// If metadata delete fails after chunks were deleted, we have dangling chunks
+	// 		ds.logger.Error("CRITICAL: Failed to delete metadata for fileID after chunk deletion", 
+	// 			zap.String("fileID", fileID),
+	// 			zap.Error(err))
+	// 		return fmt.Errorf("failed to delete metadata after chunk deletion: %w", err)
+	// 	}
+	// 	ds.logger.Info("Successfully deleted metadata for fileID", 
+	// 		zap.String("fileID", fileID))
+		
+	// 	// Warn about any failed chunks
+	// 	if len(failedChunks) > 0 {
+	// 		ds.logger.Warn("WARNING: chunks could not be deleted but metadata was removed", 
+	// 			zap.Int("failedCount", len(failedChunks)),
+	// 			zap.Int("totalCount", totalChunks))
+	// 		for _, chunk := range failedChunks {
+	// 			ds.logger.Info("  - Orphaned chunk", 
+	// 				zap.String("chunkID", chunk.ChunkID),
+	// 				zap.String("serverID", chunk.ServerID))
+	// 		}
+	// 	}
+	// } else {
+	// 	// Too many chunks failed deletion, don't delete metadata to allow for recovery
+	// 	ds.logger.Error("ERROR: Failed to delete chunks for fileID", 
+	// 		zap.String("fileID", fileID),
+	// 		zap.Int("failedCount", len(failedChunks)),
+	// 		zap.Int("totalCount", totalChunks))
+		
+	// 	return fmt.Errorf("delete failed: %d/%d chunks could not be deleted, metadata preserved for recovery",
+	// 		len(failedChunks), totalChunks)
+	// }
+
+	// return nil // Overall success
+
+	// Get Metadata
+	meta, err:= ds.GetMetadataByFilename(filename)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) { 
-			ds.logger.Info("Delete: Metadata not found for filename, assuming already deleted", 
-				zap.String("filename", filename))
-			return nil // Treat as success if metadata is gone
-		}
-		return fmt.Errorf("failed to get metadata for delete by filename '%s': %w", filename, err)
-	}
-	fileID := meta.FileID
-	
-	// 2. Convert chunk metadata to UploadedChunk format for deletion
-	ds.logger.Info("Deleting chunks for fileID", 
-		zap.String("fileID", fileID),
-		zap.String("filename", filename),
-		zap.Int("chunkCount", len(meta.Chunks)))
-	
-	// Track failures for reporting
-	var failedChunks []UploadedChunk
-	
-	// Delete each chunk
-	for _, chunkMeta := range meta.Chunks {
-		chunk := UploadedChunk{
-			ChunkID:  chunkMeta.ChunkID,
-			ServerID: chunkMeta.ServerID,
-		}
-		
-		success := ds.attemptChunkDeletion(chunk)
-		if !success {
-			failedChunks = append(failedChunks, chunk)
-		}
-	}
-	
-	// 3. Delete metadata if all chunks were deleted, or if we have acceptable failures
-	// Define acceptable as: we tried our best and most chunks were deleted
-	totalChunks := len(meta.Chunks)
-	if len(failedChunks) == 0 || float64(len(failedChunks))/float64(totalChunks) < 0.25 {
-		// Delete metadata if all chunks were deleted or if less than 25% failed
-		ds.logger.Info("Deleting metadata for fileID", 
-			zap.String("fileID", fileID),
+		if errors.Is(err, os.ErrNotExist) {
+			ds.logger.Info("Delete: Metadata not found for filename, either file doesn't exist or it's already deleted",
 			zap.String("filename", filename))
-		if err := ds.metadataService.DeleteMetadata(fileID); err != nil {
-			// If metadata delete fails after chunks were deleted, we have dangling chunks
-			ds.logger.Error("CRITICAL: Failed to delete metadata for fileID after chunk deletion", 
-				zap.String("fileID", fileID),
-				zap.Error(err))
-			return fmt.Errorf("failed to delete metadata after chunk deletion: %w", err)
+			return nil
+
 		}
-		ds.logger.Info("Successfully deleted metadata for fileID", 
-			zap.String("fileID", fileID))
-		
-		// Warn about any failed chunks
-		if len(failedChunks) > 0 {
-			ds.logger.Warn("WARNING: chunks could not be deleted but metadata was removed", 
-				zap.Int("failedCount", len(failedChunks)),
-				zap.Int("totalCount", totalChunks))
-			for _, chunk := range failedChunks {
-				ds.logger.Info("  - Orphaned chunk", 
-					zap.String("chunkID", chunk.ChunkID),
-					zap.String("serverID", chunk.ServerID))
-			}
-		}
-	} else {
-		// Too many chunks failed deletion, don't delete metadata to allow for recovery
-		ds.logger.Error("ERROR: Failed to delete chunks for fileID", 
-			zap.String("fileID", fileID),
-			zap.Int("failedCount", len(failedChunks)),
-			zap.Int("totalCount", totalChunks))
-		
-		return fmt.Errorf("delete failed: %d/%d chunks could not be deleted, metadata preserved for recovery",
-			len(failedChunks), totalChunks)
+		return fmt.Errorf("failed to get metadata for delete: %w", err)
 	}
 
-	return nil // Overall success
+	// Delete each chunk from all replicas
+	for _,chunkMeta := range meta.Chunks {
+		status, err := ds.replicationHandler.GetReplicationStatus(chunkMeta.ChunkID)
+		if err != nil {
+			ds.logger.Warn("Failed to get replication status for chunk",
+			zap.String("chunkID", chunkMeta.ChunkID),
+			zap.Error(err))
+			continue
+		}
+		nodesToDelete := append([]string{status.PrimaryNode}, status.ReplicaNodes...)
+		for _,node := range nodesToDelete {
+		client, err := ds.clientManager.GetClient(node)
+		if err != nil {
+			ds.logger.Warn("Failed to get client for node during delete",
+			zap.String("node", node),
+			zap.Error(err))
+			continue
+		}
+		if err := client.DeleteChunk(chunkMeta.ChunkID); err != nil {
+			ds.logger.Warn("Failed to delete chunk from node",
+			zap.String("chunkID", chunkMeta.ChunkID),
+			zap.String("node", node),
+			zap.Error(err),
+			)
+		}
+		}
+
+	}
+	return ds.metadataService.DeleteMetadata(meta.FileID)
+
 }
 
 // Add GetMetadataByFilename to DistributedStorage
@@ -672,15 +769,15 @@ func (ds *DistributedStorage) GetAllMetadata() ([]models.FileInfo, error) {
 	}
 
 	// Count active/failed servers for status reporting
-	activeServerCount := 0
-	totalServers := 4 // Assuming 4 servers as per your setup
+	// activeServerCount := 0
+	// totalServers := 4 // Assuming 4 servers as per your setup
 	
-	for i := 1; i <= totalServers; i++ {
-		serverID := fmt.Sprintf("server%d", i)
-		if !ds.failedServers[serverID] {
-			activeServerCount++
-		}
-	}
+	// for i := 1; i <= totalServers; i++ {
+	// 	serverID := fmt.Sprintf("server%d", i)
+	// 	if !ds.failedServers[serverID] {
+	// 		activeServerCount++
+	// 	}
+	// }
 
 	// Convert metadata entries to FileInfo structs
 	fileInfos := make([]models.FileInfo, 0, len(metadataEntries))
@@ -692,9 +789,11 @@ func (ds *DistributedStorage) GetAllMetadata() ([]models.FileInfo, error) {
 		
 		// Check if chunks are on failed servers
 		for _, chunkInfo := range metadata.Chunks {
-			if ds.failedServers[chunkInfo.ServerID] {
-				unavailableChunks++
-			}
+			// Check replication status
+            status, err := ds.replicationHandler.GetReplicationStatus(chunkInfo.ChunkID)
+            if err != nil || len(status.ReplicaNodes) < ds.replicationHandler.GetReplicationFactor()-1 {
+                unavailableChunks++
+            }
 		}
 		
 		// Determine availability status
@@ -720,13 +819,13 @@ func (ds *DistributedStorage) GetAllMetadata() ([]models.FileInfo, error) {
 		fileInfos = append(fileInfos, fileInfo)
 	}
 	
-	// Add system health info
-	if len(fileInfos) == 0 && activeServerCount < totalServers {
-		// Empty result with failed servers might be due to server issues, include a note
-		ds.logger.Warn("Warning: storage servers are down", 
-			zap.Int("activeCount", activeServerCount),
-			zap.Int("totalCount", totalServers))
-	}
+	// // Add system health info
+	// if len(fileInfos) == 0 && activeServerCount < totalServers {
+	// 	// Empty result with failed servers might be due to server issues, include a note
+	// 	ds.logger.Warn("Warning: storage servers are down", 
+	// 		zap.Int("activeCount", activeServerCount),
+	// 		zap.Int("totalCount", totalServers))
+	// }
 	
 	return fileInfos, nil
 }
@@ -827,4 +926,22 @@ func (ds *DistributedStorage) attemptChunkDeletion(chunk UploadedChunk) bool {
 		zap.String("chunkID", chunk.ChunkID),
 		zap.String("serverID", chunk.ServerID))
 	return true
+}
+
+// MarkServerFailed marks a server as failed in the failedServers map
+func (ds *DistributedStorage) MarkServerFailed(serverID string) {
+	ds.failedServersMutex.Lock()
+	defer ds.failedServersMutex.Unlock()
+	ds.failedServers[serverID] = true
+	ds.logger.Info("Server marked as failed", 
+		zap.String("serverID", serverID))
+}
+
+// MarkServerRecovered marks a server as recovered by removing it from the failedServers map
+func (ds *DistributedStorage) MarkServerRecovered(serverID string) {
+	ds.failedServersMutex.Lock()
+	defer ds.failedServersMutex.Unlock()
+	delete(ds.failedServers, serverID)
+	ds.logger.Info("Server marked as recovered", 
+		zap.String("serverID", serverID))
 }

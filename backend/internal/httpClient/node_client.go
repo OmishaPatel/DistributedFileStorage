@@ -36,16 +36,23 @@ func NewNodeClient(serverID string, client *http.Client, config ClientConfig) (N
 	exponentialBackoff := backoff.NewExponentialBackOff()
 	exponentialBackoff.MaxElapsedTime = time.Duration(config.RetryAttempts) * config.RetryDelay
 
-	// Define server addresses map
-	serverAddresses := map[string]string{
-		"server1": "http://localhost:8081",
-		"server2": "http://localhost:8082",
-		"server3": "http://localhost:8083",
-		"server4": "http://localhost:8084",
-	}
-	baseURL := serverAddresses[serverID]
+	// Get server URL from environment variable
+	envVar := fmt.Sprintf("STORAGE_NODE_%s_URL", serverID)
+	baseURL := os.Getenv(envVar)
+	
+	// Fallback to hardcoded values if environment variable is not set
 	if baseURL == "" {
-		return nil, fmt.Errorf("invalid server ID: %s", serverID)
+		// Define server addresses map (fallback)
+		serverAddresses := map[string]string{
+			"server1": "http://localhost:8081",
+			"server2": "http://localhost:8082",
+			"server3": "http://localhost:8083",
+			"server4": "http://localhost:8084",
+		}
+		baseURL = serverAddresses[serverID]
+		if baseURL == "" {
+			return nil, fmt.Errorf("invalid server ID: %s", serverID)
+		}
 	}
 
 	// Circuit breaker configuration

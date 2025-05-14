@@ -3,9 +3,12 @@ package replication
 import (
 	"backend/internal/httpclient"
 	"backend/pkg/chunk"
+	"backend/pkg/logging"
+	"backend/pkg/util"
 	"bytes"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -15,39 +18,76 @@ import (
 
 type ReplicationHandler struct {
 	clientMgr httpclient.ClientManagerInterface
-	logger *zap.Logger
+	logger *logging.Logger
 	config ReplicationConfig
 	statusStore *StatusStore
+	
 }
 var _ ReplicationManager = (*ReplicationHandler)(nil)
-func NewReplicationHandler(clientMgr httpclient.ClientManagerInterface, logger *zap.Logger, config ReplicationConfig) *ReplicationHandler {
+func NewReplicationHandler(clientMgr httpclient.ClientManagerInterface, config ReplicationConfig, logDir string) *ReplicationHandler {
+	// dedicated logger for replication
+	logPath := filepath.Join(logDir, "replication-handler.log")
+	replicationLogger, err:= logging.GetLogger(logging.LogConfig{
+		ServiceName: "replication-handler",
+		LogLevel: "info",
+		OutputPaths: []string{"stdout", logPath},
+
+	})
+
+	if err != nil {
+		fmt.Printf("Error creating replication handler logger: %v, using standard log", err)
+			minimalLogger, _ := logging.GetLogger(logging.LogConfig{
+			ServiceName: "replication-handler",
+			LogLevel:    "info",
+			OutputPaths: []string{"stdout"},
+		})
+		replicationLogger = minimalLogger
+	}
 	return &ReplicationHandler{
 		clientMgr: clientMgr,
-		logger: logger,
+		logger: replicationLogger,
 		config: config,
 		statusStore: NewStatusStore(),
 	}
 }
 
 func (h *ReplicationHandler) ReplicatedUpload(chunkID string, data io.Reader, metadata *chunk.ChunkMetadata) error {
+	    // Read all data first to verify content
+    dataBytes, err := io.ReadAll(data)
+    if err != nil {
+        return fmt.Errorf("failed to read data: %w", err)
+    }
+    
+    h.logger.Info("Starting replicated upload",
+        zap.String("chunkID", chunkID),
+        zap.Int("dataSize", len(dataBytes)),
+		zap.String("dataPreview", string(dataBytes[:min(100, len(dataBytes))]))) // Log first 100 bytes)
+
+	// end of debugger log
 	primary, replicas, err := h.SelectReplicationNodes(chunkID)
 	if err != nil {
 		return fmt.Errorf("failed to select replication nodes: %w", err)
 	}
-	//update metadata with replication info
-	metadata.PrimaryNode = primary
-	metadata.ReplicaNodes = replicas
-	metadata.Version ++
-	metadata.LastModified = time.Now().Unix()
 
+	// debug logs
+	    h.logger.Info("Selected nodes for replication",
+        zap.String("primary", primary),
+        zap.Strings("replicas", replicas))
+// ed of debug logs
 	// upload to primary node
 	primaryClient, err := h.clientMgr.GetClient(primary)
 	if err != nil {
 		return fmt.Errorf("failed to get primary client: %w", err)
 	}
-	if err := primaryClient.UploadChunk(chunkID, data); err != nil {
+	primaryReader:=bytes.NewReader(dataBytes)
+	if err := primaryClient.UploadChunk(chunkID, primaryReader); err != nil {
 		return fmt.Errorf("failed to upload to primary node: %w", err)
 	}
+	// debug logs
+	    h.logger.Info("Successfully uploaded to primary",
+        zap.String("chunkID", chunkID),
+        zap.String("primary", primary))
+	// end debug logs
 
 	// replicate to secondary nodes
 	var wg sync.WaitGroup
@@ -65,12 +105,12 @@ func (h *ReplicationHandler) ReplicatedUpload(chunkID string, data io.Reader, me
 			}
 
 			// create new reader for each replica
-			dataCopy, err := io.ReadAll(data)
+			replicaReader := bytes.NewReader(dataBytes)
 			if err != nil {
 				errChan <- fmt.Errorf("failed to read data for replicas %s: %w", node, err)
 				return
 			}
-			if err:= replicaClient.UploadChunk(chunkID, bytes.NewReader(dataCopy)); err != nil {
+			if err:= replicaClient.UploadChunk(chunkID, replicaReader); err != nil {
 				errChan <- fmt.Errorf("failed to replicate to %s: %w", node, err)
 				return
 			}
@@ -99,7 +139,11 @@ func (h *ReplicationHandler) ReplicatedUpload(chunkID string, data io.Reader, me
 		return fmt.Errorf("failed to achieve write quorum, only %d/%d replicas succeeded", len(successfulReplicas), h.config.WriteQuorum)
 
 	}
-
+	//update metadata
+	metadata.PrimaryNode = primary
+	metadata.ReplicaNodes = successfulReplicas
+	metadata.ServerID = primary
+	metadata.ServerAddress = util.GetServerAddress(primary)
 	// update replication status
 	status := ReplicationStatus{
 		ChunkID: chunkID,
@@ -119,6 +163,7 @@ func (h *ReplicationHandler) ReplicatedUpload(chunkID string, data io.Reader, me
 		LastChecked: time.Now(),
 		}
 	}
+	
 	if updateErr := h.UpdateReplicationStatus(chunkID, status); updateErr != nil {
 		h.logger.Error("Failed to update replication status", zap.Error(updateErr))
 	}
@@ -128,6 +173,7 @@ func (h *ReplicationHandler) ReplicatedUpload(chunkID string, data io.Reader, me
 		zap.String("replicas", strings.Join(successfulReplicas, ",")),
 		zap.Int("version", int(metadata.Version)),
 	)
+	
 
 	return nil
 }
@@ -363,4 +409,14 @@ func (h *ReplicationHandler) GetReplicationStatus(chunkID string) (ReplicationSt
 		return ReplicationStatus{}, fmt.Errorf("no replicationstatus found for chunkID: %s", chunkID)
 	}
 	return status, nil
+}
+
+func (h *ReplicationHandler) GetReplicationFactor() int {
+	return h.config.ReplicationFactor
+}
+func min(a, b int) int {
+    if a < b {
+        return a
+    }
+    return b
 }
