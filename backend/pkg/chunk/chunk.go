@@ -111,6 +111,7 @@ type ChunkMetadata struct {
 	ReplicaNodes  []string `json:"replica_nodes"`
 	LastModified int64 `json:"last_modified"`
 	Checksum      string `json:"checksum"`
+	OriginalName  string `json:"original_name"`
 }
 
 // Optional: Add a constructor for convenience
@@ -126,5 +127,6 @@ func NewChunkMetadata(chunkID, serverID string, size int64, index int, address s
 		ReplicaNodes: []string{},
 		LastModified: time.Now().Unix(),
 		Checksum:     "",
+		OriginalName: "",
 	}
 }
