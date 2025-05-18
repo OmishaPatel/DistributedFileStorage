@@ -8,6 +8,8 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"log"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -25,13 +27,29 @@ type ReplicationHandler struct {
 }
 var _ ReplicationManager = (*ReplicationHandler)(nil)
 func NewReplicationHandler(clientMgr httpclient.ClientManagerInterface, config ReplicationConfig, logDir string) *ReplicationHandler {
+	// Create log directory if it doesn't exist
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		log.Printf("Failed to create replication log directory: %v", err)
+		// Fallback to stdout only if directory creation fails
+		replicationLogger, _ := logging.GetLogger(logging.LogConfig{
+			ServiceName: "replication-handler",
+			LogLevel:    "info",
+			OutputPaths: []string{"stdout"},
+		})
+		return &ReplicationHandler{
+			clientMgr: clientMgr,
+			logger: replicationLogger,
+			config: config,
+			statusStore: NewStatusStore(),
+		}
+	}
+
 	// dedicated logger for replication
 	logPath := filepath.Join(logDir, "replication-handler.log")
-	replicationLogger, err:= logging.GetLogger(logging.LogConfig{
+	replicationLogger, err := logging.GetLogger(logging.LogConfig{
 		ServiceName: "replication-handler",
-		LogLevel: "info",
+		LogLevel:    "info",
 		OutputPaths: []string{"stdout", logPath},
-
 	})
 
 	if err != nil {

@@ -95,14 +95,14 @@ func NewDistributedStorageWithClientManager(metadataService metadata.MetadataSer
 		ReadQuorum: 2,
 	}
 		
-	replicationProjectRoot := filepath.Join("..", "..", "..", "..") 
-	 // Go up from backend/cmd/server to project root
-	replicationlogDir := filepath.Join(replicationProjectRoot, "logs", "replication-handler")
+	// Use project root logs directory - match the same level as distributed-coordinator-server
+	replicationlogDir := filepath.Join("..", "..", "..", "logs", "replication-handler")
+
+	
 	replicationHandler := replication.NewReplicationHandler(
 		clientManager,
 		replicationConfig,
 		replicationlogDir,
-
 	)
 
 	ds := &DistributedStorage{
