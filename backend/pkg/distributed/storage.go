@@ -173,7 +173,7 @@ func (ds *DistributedStorage) SetHealthCheckInterval(interval time.Duration) {
 
 // checkAllServersHealth performs a health check on all servers and updates the failedServers map
 func (ds *DistributedStorage) checkAllServersHealth() {
-	
+	ds.logger.Info("Performing periodic health check of all storage nodes")
 	
 	// Get all server IDs from the client manager
 	for i := 1; i <= 4; i++ {
@@ -353,7 +353,6 @@ func (ds *DistributedStorage) Upload(file io.Reader, filename string) (string, e
 			ReplicaNodes: []string{},
 			ServerID: "",
 			ServerAddress: "",
-			OriginalName: filename,
 		}
 		// Select a server for this chunk
 		// serverID, err := ds.selectHealthyServer(i)
@@ -391,7 +390,7 @@ func (ds *DistributedStorage) Upload(file io.Reader, filename string) (string, e
 		// 	zap.Int("chunkSize", len(chunkData)))
 		
 		//err = client.UploadChunk(chunkID, bytes.NewReader(chunkData))
-		err := ds.replicationHandler.DistributeAndReplicateUpload(chunkID, bytes.NewReader(chunkData), metadata)
+		err := ds.replicationHandler.ReplicatedUpload(chunkID, bytes.NewReader(chunkData), metadata)
 		if err != nil {
 			ds.logger.Error("Failed to upload chunk", 
 				zap.String("filename", filename),
@@ -500,26 +499,14 @@ func (ds *DistributedStorage) Download(filename string, version int) ([]byte, er
 	}
 
 	if err != nil {
-		ds.logger.Error("Failed to get metadata for file",
-			zap.String("filename", filename),
-			zap.Int("version", version),
-			zap.Error(err))
 		return nil, fmt.Errorf("failed to get metadata for %s: %w", filename, err)
 	}
 
 	// Get chunk info from metadata
 	chunks := fileMetadata.Chunks
 	if len(chunks) == 0 {
-		ds.logger.Error("File has no chunks",
-			zap.String("filename", filename),
-			zap.Int("version", version))
 		return nil, fmt.Errorf("file %s has no chunks", filename)
 	}
-
-	ds.logger.Info("Starting file download",
-		zap.String("filename", filename),
-		zap.Int("version", version),
-		zap.Int("chunkCount", len(chunks)))
 
 	// Download all chunks
 	chunksData := make(map[int][]byte)
@@ -527,58 +514,59 @@ func (ds *DistributedStorage) Download(filename string, version int) ([]byte, er
 	unavailableChunks := 0
 
 	for _, chunk := range chunks {
+		//serverID := chunk.ServerID
 		chunkID := chunk.ChunkID
 		chunkIndex := chunk.ChunkIndex
 
-		ds.logger.Debug("Downloading chunk",
-			zap.String("filename", filename),
-			zap.String("chunkID", chunkID),
-			zap.Int("chunkIndex", chunkIndex))
+		// Check if the server is marked as failed
+		// if ds.failedServers[serverID] {
+		// 	unavailableChunks++
+		// 	downloadErrors = append(downloadErrors, fmt.Sprintf("chunk %d unavailable: server %s is down", chunkIndex, serverID))
+		// 	continue
+		// }
 
+		// // Get the client for this server
+		// client, err := ds.clientManager.GetClient(serverID)
+		// if err != nil {
+		// 	unavailableChunks++
+		// 	downloadErrors = append(downloadErrors, fmt.Sprintf("chunk %d unavailable: cannot connect to server %s", chunkIndex, serverID))
+		// 	// Mark server as failed for future reference
+		// 	ds.failedServers[serverID] = true
+		// 	continue
+		// }
+
+		// Download the chunk
+		// chunkReader, err := client.DownloadChunk(chunkID)
+		// if err != nil {
+		// 	unavailableChunks++
+		// 	downloadErrors = append(downloadErrors, fmt.Sprintf("chunk %d download failed from server %s: %v", chunkIndex, serverID, err))
+			
+		// 	// Only mark the server as failed if it's an HTTP connection error, not a "not found" error
+		// 	if !strings.Contains(err.Error(), "not found") {
+		// 		ds.failedServers[serverID] = true
+		// 	}
+		// 	continue
+		// }
 		reader, err := ds.replicationHandler.ReplicatedDownload(chunkID)
 		if err != nil {
 			unavailableChunks++
-			errorMsg := fmt.Sprintf("chunk %d download failed: %v", chunkIndex, err)
-			ds.logger.Error("Chunk download failed",
-				zap.String("filename", filename),
-				zap.String("chunkID", chunkID),
-				zap.Int("chunkIndex", chunkIndex),
-				zap.Error(err))
-			downloadErrors = append(downloadErrors, errorMsg)
+			downloadErrors = append(downloadErrors, fmt.Sprintf("chunk %d download failed: %v", chunkIndex, err))
 			continue
 		}
-
 		// Convert ReadCloser to []byte
 		chunkData, err := io.ReadAll(reader)
 		reader.Close() // Don't forget to close the reader
 		if err != nil {
 			unavailableChunks++
-			errorMsg := fmt.Sprintf("chunk %d read failed: %v", chunkIndex, err)
-			ds.logger.Error("Failed to read chunk data",
-				zap.String("filename", filename),
-				zap.String("chunkID", chunkID),
-				zap.Int("chunkIndex", chunkIndex),
-				zap.Error(err))
-			downloadErrors = append(downloadErrors, errorMsg)
+			downloadErrors = append(downloadErrors, fmt.Sprintf("chunk %d read failed: %v", chunkIndex, err))
 			continue
 		}
 
 		chunksData[chunkIndex] = chunkData
-		ds.logger.Debug("Successfully downloaded chunk",
-			zap.String("filename", filename),
-			zap.String("chunkID", chunkID),
-			zap.Int("chunkIndex", chunkIndex),
-			zap.Int("chunkSize", len(chunkData)))
 	}
 
 	// Check if we have all chunks
 	if unavailableChunks > 0 {
-		ds.logger.Error("File download incomplete",
-			zap.String("filename", filename),
-			zap.Int("version", version),
-			zap.Int("unavailableChunks", unavailableChunks),
-			zap.Int("totalChunks", len(chunks)),
-			zap.Strings("errors", downloadErrors))
 		return nil, fmt.Errorf("file %s incomplete: %d of %d chunks unavailable. Errors: %s", 
 			filename, unavailableChunks, len(chunks), strings.Join(downloadErrors, "; "))
 	}
@@ -588,19 +576,10 @@ func (ds *DistributedStorage) Download(filename string, version int) ([]byte, er
 	for i := 0; i < len(chunks); i++ {
 		chunkData, exists := chunksData[i]
 		if !exists {
-			ds.logger.Error("Missing chunk during reassembly",
-				zap.String("filename", filename),
-				zap.Int("version", version),
-				zap.Int("chunkIndex", i))
 			return nil, fmt.Errorf("missing chunk at index %d during reassembly", i)
 		}
 		fileData = append(fileData, chunkData...)
 	}
-
-	ds.logger.Info("File download completed successfully",
-		zap.String("filename", filename),
-		zap.Int("version", version),
-		zap.Int("totalSize", len(fileData)))
 
 	return fileData, nil
 }
