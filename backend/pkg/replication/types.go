@@ -1,6 +1,10 @@
 package replication
 
-import "time"
+import (
+	"backend/pkg/chunk"
+	"io"
+	"time"
+)
 
 // ReplicationStatus represents the status of a chunk's replication
 type ReplicationStatus struct {
@@ -24,6 +28,8 @@ type ReplicationManager interface{
 	SelectReplicationNodes(chunkID string) (primary string, replicas []string, err error)
 	UpdateReplicationStatus(chunkID string, status ReplicationStatus) error
 	GetReplicationStatus(chunkID string) (ReplicationStatus, error)
+	DistributeAndReplicateUpload(chunkID string, data io.Reader, metadata *chunk.ChunkMetadata) error
+	DeleteChunk(chunkID string) error
 }
 
 

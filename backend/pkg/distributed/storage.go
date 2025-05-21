@@ -21,7 +21,6 @@ import (
 	"backend/pkg/metadata"
 	"backend/pkg/models"
 	"backend/pkg/replication"
-	"backend/pkg/util"
 
 	"go.uber.org/zap"
 )
@@ -329,7 +328,8 @@ func (ds *DistributedStorage) Upload(file io.Reader, filename string) (string, e
 		zap.Int("chunkCount", len(chunks)))
 
 	// Upload each chunk to a storage node
-	uploadedChunks := make([]UploadedChunk, 0, len(chunks))
+	//uploadedChunks := make([]UploadedChunk, 0, len(chunks))
+	uploadedChunks := make([]chunk.ChunkMetadata, 0, len(chunks))
 	
 	// Check if we need to track which servers to use (for error handling)
 	// if len(chunks) == 0 {
@@ -343,7 +343,7 @@ func (ds *DistributedStorage) Upload(file io.Reader, filename string) (string, e
 		// Generate chunk ID
 		chunkID := generateChunkID(fileID, i)
 		// create chunk metadata
-		metadata := &chunk.ChunkMetadata{
+		chunkMetadata := &chunk.ChunkMetadata{
 			ChunkID: chunkID,
 			Version: newVersion,
 			ChunkIndex: i,
@@ -390,7 +390,7 @@ func (ds *DistributedStorage) Upload(file io.Reader, filename string) (string, e
 		// 	zap.Int("chunkSize", len(chunkData)))
 		
 		//err = client.UploadChunk(chunkID, bytes.NewReader(chunkData))
-		err := ds.replicationHandler.ReplicatedUpload(chunkID, bytes.NewReader(chunkData), metadata)
+		err := ds.replicationHandler.DistributeAndReplicateUpload(chunkID, bytes.NewReader(chunkData), chunkMetadata)
 		if err != nil {
 			ds.logger.Error("Failed to upload chunk", 
 				zap.String("filename", filename),
@@ -404,84 +404,138 @@ func (ds *DistributedStorage) Upload(file io.Reader, filename string) (string, e
 			// ds.failedServersMutex.Unlock()
 			
 			// Cleanup and return error
-			ds.cleanupPartialUpload(uploadedChunks, filename)
-			return "", fmt.Errorf("chunk upload failed: %w", err)
-
-			
-		}
-		// Get replication status
-		status, err := ds.replicationHandler.GetReplicationStatus(chunkID)
-		if err != nil {
-			metadata.PrimaryNode = status.PrimaryNode
-			metadata.ReplicaNodes = status.ReplicaNodes
-			metadata.ServerID = status.PrimaryNode
-			metadata.ServerAddress = util.GetServerAddress(status.PrimaryNode)
-		}
-			uploadedChunks = append(uploadedChunks, UploadedChunk{
-				
-			
-				ChunkID: chunkID,
-				ServerID: metadata.ServerID,
-			})
+			for _, uploadedChunk := range uploadedChunks {
+				if err := ds.replicationHandler.DeleteChunk(uploadedChunk.ChunkID); err != nil {
+					ds.logger.Error("Failed to clean up chunk after upload failure",
+					zap.String("chunkID", uploadedChunk.ChunkID),
+					zap.Error(err))
+				}
+			}
+			return "", fmt.Errorf("failed to upload chunk %d: %w", i, err)
 		}
 
-		
-		// // Track uploaded chunk
-		// uploadedChunks = append(uploadedChunks, UploadedChunk{
-		// 	ChunkID:  chunkID,
-		// 	ServerID: serverID,
-		// })
-		
-		// ds.logger.Debug("Chunk uploaded successfully", 
-		// 	zap.String("filename", filename),
-		// 	zap.String("chunkID", chunkID),
-		// 	zap.String("serverID", serverID),
-		// 	zap.Int("chunkIndex", i))
-	
+		// Add to our list of uploaded chunks
+		uploadedChunks = append(uploadedChunks, *chunkMetadata)
+		ds.logger.Debug("Chunk uploaded successfully",
+			zap.String("filename", filename),
+			zap.String("chunkID", chunkID),
+			zap.Int("chunkIndex", i),
+			zap.String("primaryNode", chunkMetadata.PrimaryNode),
+			zap.Strings("replicaNodes", chunkMetadata.ReplicaNodes))
+	}
 
 	// Create metadata entry for this file
 	fileMetadata := &metadata.FileMetadata{
 		OriginalName: filename,
-		FileID:       fileID,
-		TotalSize:    int64(len(fileBytes)),
-		Version:      newVersion,
-		CreatedAt:    time.Now(),
+		FileID: fileID,
+		TotalSize: int64(len(fileBytes)),
+		Version: newVersion,
+		CreatedAt: time.Now(),
 		LastModified: time.Now(),
-		Chunks:       make([]chunk.ChunkMetadata, 0, len(chunks)),
+		Chunks: make([]chunk.ChunkMetadata, 0, len(chunks)),
 	}
-	
-	// Add chunk information
-	for i, uploadedChunk := range uploadedChunks {
-		chunkMetadata := chunk.NewChunkMetadata(
-			uploadedChunk.ChunkID,
-			uploadedChunk.ServerID,
-			int64(ds.chunkManager.GetChunkSize()),
-			i,
-			util.GetServerAddress(uploadedChunk.ServerID),
-		)
-		fileMetadata.Chunks = append(fileMetadata.Chunks, chunkMetadata)
+
+	// Add chunk information -use actual metadata from uploads
+	for _, uploadedChunk := range uploadedChunks {
+		fileMetadata.Chunks = append(fileMetadata.Chunks, uploadedChunk)
 	}
-	
-	// Save metadata
+	// Save metaddata
 	err = ds.metadataService.StoreMetadata(fileMetadata)
 	if err != nil {
-		ds.logger.Error("Failed to save metadata", 
+		ds.logger.Error("Failed to save metadata",
 			zap.String("filename", filename),
 			zap.String("fileID", fileID),
 			zap.Error(err))
-		// Cleanup chunks as the metadata couldn't be saved
-		ds.cleanupPartialUpload(uploadedChunks, filename)
+		// cleanup chunks as metadata couldn't be saved
+		for _, chunk := range uploadedChunks {
+			if err := ds.replicationHandler.DeleteChunk(chunk.ChunkID); err != nil {
+				ds.logger.Error("Failed to clean up chunk after metadata storage failure",
+				zap.String("chunkID", chunk.ChunkID),
+				zap.Error(err))
+			}
+		}
 		return "", fmt.Errorf("failed to save metadata: %w", err)
 	}
-	
-	ds.logger.Info("File upload completed successfully", 
+	ds.logger.Info("File upload complete successfully",
 		zap.String("filename", filename),
 		zap.String("fileID", fileID),
 		zap.Int("version", newVersion),
 		zap.Int("chunkCount", len(chunks)),
 		zap.Int("size", len(fileBytes)))
-		
 	return fileID, nil
+	// 	// Get replication status
+	// 	status, err := ds.replicationHandler.GetReplicationStatus(chunkID)
+	// 	if err != nil {
+	// 		metadata.PrimaryNode = status.PrimaryNode
+	// 		metadata.ReplicaNodes = status.ReplicaNodes
+	// 		metadata.ServerID = status.PrimaryNode
+	// 		metadata.ServerAddress = util.GetServerAddress(status.PrimaryNode)
+	// 	}
+	// 		uploadedChunks = append(uploadedChunks, UploadedChunk{
+				
+			
+	// 			ChunkID: chunkID,
+	// 			ServerID: metadata.ServerID,
+	// 		})
+	// 	}
+
+		
+	// 	// // Track uploaded chunk
+	// 	// uploadedChunks = append(uploadedChunks, UploadedChunk{
+	// 	// 	ChunkID:  chunkID,
+	// 	// 	ServerID: serverID,
+	// 	// })
+		
+	// 	// ds.logger.Debug("Chunk uploaded successfully", 
+	// 	// 	zap.String("filename", filename),
+	// 	// 	zap.String("chunkID", chunkID),
+	// 	// 	zap.String("serverID", serverID),
+	// 	// 	zap.Int("chunkIndex", i))
+	
+
+	// // Create metadata entry for this file
+	// fileMetadata := &metadata.FileMetadata{
+	// 	OriginalName: filename,
+	// 	FileID:       fileID,
+	// 	TotalSize:    int64(len(fileBytes)),
+	// 	Version:      newVersion,
+	// 	CreatedAt:    time.Now(),
+	// 	LastModified: time.Now(),
+	// 	Chunks:       make([]chunk.ChunkMetadata, 0, len(chunks)),
+	// }
+	
+	// // Add chunk information
+	// for i, uploadedChunk := range uploadedChunks {
+	// 	chunkMetadata := chunk.NewChunkMetadata(
+	// 		uploadedChunk.ChunkID,
+	// 		uploadedChunk.ServerID,
+	// 		int64(ds.chunkManager.GetChunkSize()),
+	// 		i,
+	// 		util.GetServerAddress(uploadedChunk.ServerID),
+	// 	)
+	// 	fileMetadata.Chunks = append(fileMetadata.Chunks, chunkMetadata)
+	// }
+	
+	// // Save metadata
+	// err = ds.metadataService.StoreMetadata(fileMetadata)
+	// if err != nil {
+	// 	ds.logger.Error("Failed to save metadata", 
+	// 		zap.String("filename", filename),
+	// 		zap.String("fileID", fileID),
+	// 		zap.Error(err))
+	// 	// Cleanup chunks as the metadata couldn't be saved
+	// 	ds.cleanupPartialUpload(uploadedChunks, filename)
+	// 	return "", fmt.Errorf("failed to save metadata: %w", err)
+	// }
+	
+	// ds.logger.Info("File upload completed successfully", 
+	// 	zap.String("filename", filename),
+	// 	zap.String("fileID", fileID),
+	// 	zap.Int("version", newVersion),
+	// 	zap.Int("chunkCount", len(chunks)),
+	// 	zap.Int("size", len(fileBytes)))
+		
+	// return fileID, nil
 }
 
 // Download retrieves a file by filename and version with improved error handling for server failures

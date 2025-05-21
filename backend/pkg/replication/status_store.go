@@ -25,3 +25,9 @@ func (s *StatusStore) Get(chunkID string) (ReplicationStatus, bool) {
 	status, exists := s.status[chunkID]
 	return status, exists
 }
+
+func (s *StatusStore) Delete(chunkID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.status, chunkID)
+}

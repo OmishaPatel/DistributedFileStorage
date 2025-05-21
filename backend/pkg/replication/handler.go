@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -195,6 +196,135 @@ func (h *ReplicationHandler) ReplicatedUpload(chunkID string, data io.Reader, me
 
 	return nil
 }
+// DistributeAndReplicateUpload distributes chunks in round-robin fashion and then replicates
+func (h *ReplicationHandler) DistributeAndReplicateUpload(chunkID string, data io.Reader, metadata *chunk.ChunkMetadata) error {
+	dataBytes, err := io.ReadAll(data)
+
+	if err != nil {
+		return fmt.Errorf("failed to read data: %w", err)
+	}
+	h.logger.Info("Starting distributed upload with replication",
+		zap.String("chunkID", chunkID),
+		zap.Int("dataSize", len(dataBytes)))
+
+	// Get all available nodes
+	nodesStatus := h.clientMgr.GetAllNodesHealth()
+	if nodesStatus.HealthyCount < 2 {
+		return fmt.Errorf("not enough healthy nodes for distribution and replication, need at least 2, got %d", nodesStatus.HealthyCount)
+	}
+	// create sorted slice of sever IDs to ensure consistent distribution
+	serverIDs := make([]string, 0, nodesStatus.HealthyCount)
+	for _, node := range nodesStatus.Nodes {
+		if node.Healthy {
+			serverIDs = append(serverIDs, node.ServerID)
+		}
+	}
+	//sort server ids to ensure consistent distribution pattern
+	sort.Strings(serverIDs)
+	// Calculate primary node using round-robin 
+	primaryIndex := metadata.ChunkIndex % len(serverIDs)
+	primaryNode := serverIDs[primaryIndex]
+
+	replicaNodes := make([]string, 0, h.config.ReplicationFactor-1)
+	for i := 1; i < h.config.ReplicationFactor && i < len(serverIDs); i++ {
+		replicaIndex := (primaryIndex + i) % len(serverIDs)
+		replicaNodes = append(replicaNodes, serverIDs[replicaIndex])
+	}
+
+	h.logger.Info("Selected nodes using round-robin distribution",
+		zap.String("chunkID", chunkID),
+		zap.Int("chunkIndex", metadata.ChunkIndex),
+		zap.String("primaryNode", primaryNode),
+		zap.Strings("replicaNodes", replicaNodes))
+
+	//upload to primary first
+	primaryClient, err := h.clientMgr.GetClient(primaryNode)
+	if err != nil {
+		return fmt.Errorf("failed to get primary client: %w", err)
+	}
+	if err:= primaryClient.UploadChunk(chunkID, bytes.NewReader(dataBytes)); err != nil {
+		return fmt.Errorf("failed to upload to primary node %s: %w", primaryNode, err)
+	}
+	h.logger.Info("Sucessfully uploaded to primary node",
+		zap.String("chunkID", chunkID),
+		zap.String("primaryNOde", primaryNode))
+
+	// Replicate to secondary index
+	var wg sync.WaitGroup
+	errChan := make(chan error, len(replicaNodes))
+	successChan := make(chan string, len(replicaNodes))
+
+	for _,replica := range replicaNodes {
+		wg.Add(1)
+		go func(node string) {
+			defer wg.Done()
+			replicaClient, err:= h.clientMgr.GetClient(node)
+
+			if err != nil {
+				errChan <- fmt.Errorf("failed to get replica client for %s: %w", node, err)
+				return
+			}
+			if err:= replicaClient.UploadChunk(chunkID, bytes.NewReader(dataBytes)); err != nil {
+				errChan <- fmt.Errorf("failed to replicate to %s: %w", node, err)
+				return
+			}
+			successChan <- node
+		}(replica)
+	}
+
+	// wait for all replicas to finish
+	wg.Wait()
+	close(errChan)
+	close(successChan)
+
+	// check for errors and ensure write quorum
+	errorCount := 0
+	for err := range errChan {
+		errorCount ++
+		h.logger.Error("Replication error", zap.Error(err))
+	}
+	successfulReplicas := make([]string, 0)
+	for node := range successChan {
+		successfulReplicas = append(successfulReplicas, node)
+	}
+	// update metadata
+	metadata.PrimaryNode = primaryNode
+	metadata.ReplicaNodes = successfulReplicas
+	metadata.ServerID = primaryNode
+	metadata.ServerAddress = util.GetServerAddress(primaryNode)
+
+	// update replication status
+	status := ReplicationStatus{
+		ChunkID: chunkID,
+		Version: int64(metadata.Version),
+		PrimaryNode: primaryNode,
+		ReplicaNodes: successfulReplicas,
+		Status: "replicated",
+		LastChecked: time.Now(),
+	}
+
+	if errorCount > 0 && len(successfulReplicas) < h.config.WriteQuorum -1 {
+		status.Status = "partial"
+		h.logger.Warn("Achieved only partial replication",
+			zap.String("chunkID", chunkID),
+			zap.Int("successfulReplicas", len(successfulReplicas)),
+			zap.Int("requiredQuorum", h.config.WriteQuorum -1))
+	}
+
+	if err := h.UpdateReplicationStatus(chunkID, status); err != nil {
+		h.logger.Error("failed to update replication status", zap.Error(err))
+	}
+	h.logger.Info("Sucessfully complete distributed upload with replication",
+		zap.String("chunkID", chunkID),
+		zap.String("primaryNode", primaryNode),
+		zap.Strings("replicaNodes", successfulReplicas),
+		zap.Int("chunkIndex", metadata.ChunkIndex))
+	return nil
+
+}
+
+
+
  func(h *ReplicationHandler) ReplicatedDownload(chunkID string) (io.ReadCloser, error) {
 	status, err := h.GetReplicationStatus(chunkID)
 
@@ -437,4 +567,48 @@ func min(a, b int) int {
         return a
     }
     return b
+}
+
+func(h *ReplicationHandler) DeleteChunk(chunkID string) error {
+	status, err := h.GetReplicationStatus(chunkID)
+	if err != nil {
+		return fmt.Errorf("failed to get replication status for deletion: %w", err)
+	}
+	allNodes := make([]string, 0 , 1+len(status.ReplicaNodes))
+	allNodes = append(allNodes, status.PrimaryNode)
+	allNodes = append(allNodes, status.ReplicaNodes...)
+
+	// delete from all nodes
+	var wg sync.WaitGroup
+	errChan := make(chan error, len(allNodes))
+
+	for _, node := range allNodes {
+		wg.Add(1)
+		go func(nodeID string) {
+			defer wg.Done()
+			client, err := h.clientMgr.GetClient(nodeID)
+			if err != nil {
+				errChan <- fmt.Errorf("failed to get client for node %s: %w", nodeID, err)
+				return
+			}
+			if err:= client.DeleteChunk(chunkID); err != nil {
+				errChan <- fmt.Errorf("failed to delete chunk from node %s: %w", nodeID, err)
+				return
+			}
+		}(node)
+	}
+	wg.Wait()
+	close(errChan)
+
+	// check for errors
+	var errs []string
+	for err := range errChan {
+		errs = append(errs, err.Error())
+	}
+	if len(errs) >0 {
+		return fmt.Errorf("failed to delete chunk from some nodes: %s", strings.Join(errs, "; ") )
+	}
+	// update status store
+	h.statusStore.Delete(chunkID)
+	return nil
 }
