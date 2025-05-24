@@ -58,12 +58,12 @@ func NewNodeClient(serverID string, client *http.Client, config ClientConfig) (N
 	// Circuit breaker configuration
 	cbSettings := gobreaker.Settings{
 		Name:        fmt.Sprintf("http-client-%s", serverID),
-		MaxRequests: 5,                  // Max requests allowed in half-open state
-		Interval:    30 * time.Second,   // Cyclic period of the closed state
-		Timeout:     60 * time.Second,   // Time after which circuit switches from open to half-open
+		MaxRequests: 3,                  // Max requests allowed in half-open state
+		Interval:    10 * time.Second,   // Cyclic period of the closed state
+		Timeout:     5 * time.Second,   // Time after which circuit switches from open to half-open
 		ReadyToTrip: func(counts gobreaker.Counts) bool {
-			// Trip condition: 5+ requests and more than 50% failures
-			return counts.Requests >= 5 && float64(counts.TotalFailures)/float64(counts.Requests) >= 0.5
+			// Trip condition: 2+ requests and more than 50% failures
+			return counts.Requests >= 2 && float64(counts.TotalFailures)/float64(counts.Requests) >= 0.5
 		},
 		OnStateChange: func(name string, from gobreaker.State, to gobreaker.State) {
 			// Log state changes

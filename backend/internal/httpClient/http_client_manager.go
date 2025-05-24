@@ -36,10 +36,10 @@ func DefaultConfig() ClientConfig {
 	return ClientConfig{
 		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: 10,
-		Timeout:             10 * time.Second,
+		Timeout:             2 * time.Second,
 		KeepAlive:           30 * time.Second,
-		RetryAttempts:       3,
-		RetryDelay:          10 * time.Second,
+		RetryAttempts:       1,
+		RetryDelay:          1 * time.Second,
 	}
 }
 
