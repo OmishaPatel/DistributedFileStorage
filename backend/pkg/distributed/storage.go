@@ -111,7 +111,7 @@ func NewDistributedStorageWithClientManager(metadataService metadata.MetadataSer
 		failedServers:      make(map[string]bool),
 		failedServersMutex: sync.RWMutex{},
 		logger:             distLogger,
-		healthCheckInterval: 30 * time.Second, // Default 30-second interval
+		healthCheckInterval: 5 * time.Second, // Default 5-second interval
 		replicationHandler: replicationHandler,
 	}
 	
@@ -602,7 +602,7 @@ func (ds *DistributedStorage) Download(filename string, version int) ([]byte, er
 		// 	}
 		// 	continue
 		// }
-		reader, err := ds.replicationHandler.ReplicatedDownload(chunkID)
+		reader, err := ds.replicationHandler.HealthAwareReplicatedDownload(chunkID)
 		if err != nil {
 			unavailableChunks++
 			downloadErrors = append(downloadErrors, fmt.Sprintf("chunk %d download failed: %v", chunkIndex, err))

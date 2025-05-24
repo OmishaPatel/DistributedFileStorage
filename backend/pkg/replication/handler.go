@@ -6,6 +6,7 @@ import (
 	"backend/pkg/logging"
 	"backend/pkg/util"
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -26,6 +27,14 @@ type ReplicationHandler struct {
 	statusStore *StatusStore
 	
 }
+
+type downloadResult struct {
+	reader    io.ReadCloser
+	nodeID    string
+	isPrimary bool
+	err       error
+}
+
 var _ ReplicationManager = (*ReplicationHandler)(nil)
 func NewReplicationHandler(clientMgr httpclient.ClientManagerInterface, config ReplicationConfig, logDir string) *ReplicationHandler {
 	// Create log directory if it doesn't exist
@@ -628,4 +637,160 @@ func(h *ReplicationHandler) DeleteChunk(chunkID string) error {
 	h.statusStore.Delete(chunkID)
 	
 	return nil
+}
+
+func (h * ReplicationHandler) HealthAwareReplicatedDownload(chunkID string) (io.ReadCloser, error) {
+	status, err := h.GetReplicationStatus(chunkID)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to get replication status: %w", err)
+	}
+	// get health status of all nodes
+	allNodes := append([]string{status.PrimaryNode}, status.ReplicaNodes...)
+	healthyNodes := h.getHealthyNodes(allNodes)
+
+	h.logger.Info("Health-aware download started",
+		zap.String("chunkID", chunkID),
+		zap.String("primaryNode", status.PrimaryNode),
+		zap.Strings("allNodes", allNodes),
+		zap.Strings("healthyNodes", healthyNodes))
+
+	if len(healthyNodes) == 0 {
+		h.logger.Error("No healthy nodes available, aborting download",
+			zap.String("chunkID", chunkID))
+	}
+	return h.fastParallelDownload(chunkID, healthyNodes, status.PrimaryNode)
+}
+
+func (h *ReplicationHandler) getHealthyNodes(nodes []string) []string {
+	var healthy []string
+
+	for _,node := range nodes {
+		nodeHealth, err := h.clientMgr.GetNodeHealth(node)
+		if err != nil {
+			h.logger.Debug("Failed to get node health",
+			zap.String("node", node),
+			zap.Error(err))
+			continue
+		}
+		// consider node healthy if circuit is not open
+		if nodeHealth.Healthy || nodeHealth.CircuitState != "OPEN" {
+			healthy = append(healthy, node)
+		}
+	}
+	return healthy
+}
+
+func (h *ReplicationHandler) fastParallelDownload(chunkID string, healthyNodes[]string, primaryNode string) (io.ReadCloser, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5 *time.Second)
+
+	defer cancel()
+
+	resultChan := make(chan downloadResult, len(healthyNodes))
+
+	for _,node := range healthyNodes {
+		isPrimary := node == primaryNode
+		go h.tryFastDownload(ctx, chunkID, node, resultChan, isPrimary)
+	}
+	// collect result with preference for primary
+	var primaryResult, firstResult *downloadResult
+	resultsReceived := 0
+
+	for resultsReceived < len(healthyNodes) {
+		select {
+			case result := <-resultChan:
+				resultsReceived ++
+				if result.err == nil {
+					if result.isPrimary {
+						primaryResult = &result
+						// if primary success use it immediately
+						h.logger.Info("Primary node download successful",
+							zap.String("chunkID", chunkID),
+							zap.String("node", result.nodeID))
+						return result.reader, nil
+					}else if firstResult == nil {
+						firstResult = &result
+					}
+				} else {
+					h.logger.Debug("Node download failed",
+						zap.String("chunkID", chunkID),
+						zap.String("node", result.nodeID),
+						zap.Bool("isPrimary", result.isPrimary),
+						zap.Error(result.err))
+				}
+				case <-ctx.Done():
+					// use best available result
+					if primaryResult != nil {
+						return primaryResult.reader, nil
+					}
+					if firstResult != nil {
+						return firstResult.reader, nil
+					}
+					return nil, fmt.Errorf("download timeout: no successful downloads")
+		}
+	}
+	// all results available use primary if avilable otherwise first successful
+	if primaryResult != nil {
+		return primaryResult.reader, nil
+	}
+	if firstResult != nil {
+		h.logger.Info("Using replica download (primary failed)",
+			zap.String("chunkID", chunkID),
+			zap.String("node", firstResult.nodeID))
+		return firstResult.reader, nil
+	}
+	return nil, fmt.Errorf("all healthy nodes failed to download chunk")
+}
+
+func (h *ReplicationHandler) tryFastDownload(ctx context.Context, chunkID, nodeID string, resultChan chan<- downloadResult, isPrimary bool) {
+	client, err := h.clientMgr.GetClient(nodeID)
+	if err != nil {
+		select {
+			case resultChan <- downloadResult{
+				nodeID: nodeID,
+				isPrimary: isPrimary,
+				err: fmt.Errorf("failed to get client for %s: %w", nodeID, err),
+			}:
+			case <-ctx.Done():
+
+		}
+		return
+	}
+
+	// create time out context for specific download
+	downloadCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	// channel to receive download result
+	downloadChan := make(chan downloadResult, 1)
+
+	go func() {
+		reader, err := client.DownloadChunk(chunkID)
+		downloadChan <- downloadResult{
+			reader: reader,
+			nodeID: nodeID,
+			isPrimary: isPrimary,
+			err: err,
+		}
+	}()
+
+	select {
+		case result := <-downloadChan:
+			select {
+				case resultChan <- result:
+				case <-ctx.Done():
+					if result.reader != nil {
+						result.reader.Close()
+					}
+			}
+		case <-downloadCtx.Done():
+			select {
+				case resultChan <- downloadResult{
+					nodeID: nodeID,
+					isPrimary: isPrimary,
+					err: fmt.Errorf("download timeout from %s", nodeID),
+				}:
+		case <-ctx.Done():
+			}
+	}
 }
