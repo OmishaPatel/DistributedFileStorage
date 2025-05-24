@@ -111,6 +111,7 @@ type ChunkMetadata struct {
 	ReplicaNodes  []string `json:"replica_nodes"`
 	LastModified int64 `json:"last_modified"`
 	Checksum      string `json:"checksum"`
+	OriginalName string `json:"filename"`
 }
 
 // Optional: Add a constructor for convenience

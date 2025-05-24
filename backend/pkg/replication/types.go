@@ -14,6 +14,7 @@ type ReplicationStatus struct {
 	ReplicaNodes []string `json:"replica_nodes"`
 	Status string `json:"status"`
 	LastChecked time.Time `json:"last_checked"`
+	OriginalName string `json:"filename"`
 }
 
 // ReplicationConfig holds configuration for replication

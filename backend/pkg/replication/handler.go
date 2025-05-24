@@ -80,6 +80,7 @@ func (h *ReplicationHandler) ReplicatedUpload(chunkID string, data io.Reader, me
     h.logger.Info("Starting replicated upload",
         zap.String("chunkID", chunkID),
         zap.Int("dataSize", len(dataBytes)),
+		zap.String("filename", metadata.OriginalName),
 		zap.String("dataPreview", string(dataBytes[:min(100, len(dataBytes))]))) // Log first 100 bytes)
 
 	// end of debugger log
@@ -205,7 +206,8 @@ func (h *ReplicationHandler) DistributeAndReplicateUpload(chunkID string, data i
 	}
 	h.logger.Info("Starting distributed upload with replication",
 		zap.String("chunkID", chunkID),
-		zap.Int("dataSize", len(dataBytes)))
+		zap.Int("dataSize", len(dataBytes)),
+		zap.String("filename", metadata.OriginalName))
 
 	// Get all available nodes
 	nodesStatus := h.clientMgr.GetAllNodesHealth()
@@ -234,6 +236,7 @@ func (h *ReplicationHandler) DistributeAndReplicateUpload(chunkID string, data i
 	h.logger.Info("Selected nodes using round-robin distribution",
 		zap.String("chunkID", chunkID),
 		zap.Int("chunkIndex", metadata.ChunkIndex),
+		zap.String("filename", metadata.OriginalName),
 		zap.String("primaryNode", primaryNode),
 		zap.Strings("replicaNodes", replicaNodes))
 
@@ -247,7 +250,8 @@ func (h *ReplicationHandler) DistributeAndReplicateUpload(chunkID string, data i
 	}
 	h.logger.Info("Sucessfully uploaded to primary node",
 		zap.String("chunkID", chunkID),
-		zap.String("primaryNOde", primaryNode))
+		zap.String("primaryNOde", primaryNode),
+		zap.String("filename", metadata.OriginalName))
 
 	// Replicate to secondary index
 	var wg sync.WaitGroup
@@ -281,7 +285,10 @@ func (h *ReplicationHandler) DistributeAndReplicateUpload(chunkID string, data i
 	errorCount := 0
 	for err := range errChan {
 		errorCount ++
-		h.logger.Error("Replication error", zap.Error(err))
+		h.logger.Error("Replication error", 
+		zap.Error(err),
+		zap.String("chunkID", chunkID),
+		zap.String("filename", metadata.OriginalName))
 	}
 	successfulReplicas := make([]string, 0)
 	for node := range successChan {
@@ -301,6 +308,7 @@ func (h *ReplicationHandler) DistributeAndReplicateUpload(chunkID string, data i
 		ReplicaNodes: successfulReplicas,
 		Status: "replicated",
 		LastChecked: time.Now(),
+		OriginalName: metadata.OriginalName,
 	}
 
 	if errorCount > 0 && len(successfulReplicas) < h.config.WriteQuorum -1 {
@@ -318,7 +326,8 @@ func (h *ReplicationHandler) DistributeAndReplicateUpload(chunkID string, data i
 		zap.String("chunkID", chunkID),
 		zap.String("primaryNode", primaryNode),
 		zap.Strings("replicaNodes", successfulReplicas),
-		zap.Int("chunkIndex", metadata.ChunkIndex))
+		zap.Int("chunkIndex", metadata.ChunkIndex),
+		zap.String("filename", metadata.OriginalName))
 	return nil
 
 }
@@ -344,12 +353,14 @@ func (h *ReplicationHandler) DistributeAndReplicateUpload(chunkID string, data i
 		if err == nil {
 			h.logger.Info("Sucessfully read from primary",
 				zap.String("chunkID", chunkID),
-				zap.String("primaryNode", status.PrimaryNode))
+				zap.String("primaryNode", status.PrimaryNode),
+				zap.String("filename", status.OriginalName))
 			return reader, nil
 		}
 		h.logger.Warn("Failed to read from primary, trying replicas",
 			zap.String("chunkID", chunkID),
 			zap.String("primaryNode", status.PrimaryNode),
+			zap.String("filename", status.OriginalName),
 			zap.Error(err))
 	}
 
@@ -546,6 +557,7 @@ func (h *ReplicationHandler) UpdateReplicationStatus(chunkID string, status Repl
     h.logger.Info("Replication status update",
         zap.String("chunkID", chunkID),
         zap.String("status", status.Status),
+		zap.String("filename", status.OriginalName),
         zap.String("primaryNode", status.PrimaryNode),
         zap.Strings("replicaNodes", status.ReplicaNodes))
 	return nil
@@ -609,6 +621,11 @@ func(h *ReplicationHandler) DeleteChunk(chunkID string) error {
 		return fmt.Errorf("failed to delete chunk from some nodes: %s", strings.Join(errs, "; ") )
 	}
 	// update status store
+	h.logger.Info("Deleting chunk",
+		zap.String("chunkID", chunkID),
+		zap.String("filename", status.OriginalName),
+		zap.String("primaryNode", status.PrimaryNode))
 	h.statusStore.Delete(chunkID)
+	
 	return nil
 }

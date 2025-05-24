@@ -353,6 +353,7 @@ func (ds *DistributedStorage) Upload(file io.Reader, filename string) (string, e
 			ReplicaNodes: []string{},
 			ServerID: "",
 			ServerAddress: "",
+			OriginalName: filename,
 		}
 		// Select a server for this chunk
 		// serverID, err := ds.selectHealthyServer(i)
