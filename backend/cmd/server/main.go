@@ -4,7 +4,10 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 
 	httpclient "backend/internal/httpclient"
 	"backend/pkg/distributed"
@@ -104,8 +107,8 @@ func main() {
 		logger.Fatal("Failed to create coordinator server", zap.Error(err))
 	}
 
-	// Set up graceful shutdown
-//	setupGracefulShutdown(logger, distributedStorage)
+	
+	setupGracefulShutdown(logger, distributedStorage)
 
 	logger.Info("Coordinator server starting", zap.String("port", *port))
 	if err := srv.Run(":" + *port); err != nil {
@@ -113,23 +116,23 @@ func main() {
 	}
 }
 
-// setupGracefulShutdown handles graceful shutdown of components
-// func setupGracefulShutdown(logger *logging.Logger, ds *distributed.DistributedStorage) {
-// 	c := make(chan os.Signal, 1)
-// 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+
+func setupGracefulShutdown(logger *logging.Logger, ds *distributed.DistributedStorage) {
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 	
-// 	go func() {
-// 		<-c
-// 		logger.Info("Shutting down...")
+	go func() {
+		<-c
+		logger.Info("Shutting down...")
 		
-// 		// Stop health monitoring
-// 		ds.StopHealthMonitoring()
+		// Stop health monitoring
+		ds.StopHealthMonitoring()
 		
-// 		// Close loggers
-// 		logging.CloseAllLoggers()// add correct method here
+		// Close loggers
+		logging.Shutdown()
 		
-// 		os.Exit(0)
-// 	}()
-// }
+		os.Exit(0)
+	}()
+}
 
 
