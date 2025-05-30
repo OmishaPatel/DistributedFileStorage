@@ -150,7 +150,8 @@ func (s *CoordinatorServer) handleDownloadFile(c *gin.Context) {
 	if versionQuery != "" {
 		version, err = strconv.Atoi(versionQuery)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid version number format"})
+			c.Header("Content-Type", "application/json")
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "Invalid version number format"})
 			return
 		}
 		s.logger.Info("Attempting to download specific version", 
@@ -169,25 +170,31 @@ func (s *CoordinatorServer) handleDownloadFile(c *gin.Context) {
 			zap.Int("version", version), 
 			zap.Error(err))
 		
-		// Check for specific error types
+		// Check for specific error types and return appropriate JSON responses
+		c.Header("Content-Type", "application/json")
 		if errors.Is(err, os.ErrNotExist) {
-			c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("File not found: %s", filename)})
+			if version > 0 {
+				c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("Version %d of file '%s' does not exist", version, filename)})
+			} else {
+				c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("File '%s' does not exist", filename)})
+			}
 			return
 		}
 		
 		// Check if the error message contains something about "unavailable" or "incomplete"
 		if strings.Contains(err.Error(), "incomplete") || strings.Contains(err.Error(), "unavailable") {
-			c.JSON(http.StatusServiceUnavailable, gin.H{
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
 				"error": "File is currently unavailable due to storage node failures",
 				"detail": err.Error(),
 			})
 			return
 		}
 		
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to download file: %v", err)})
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to download file: %v", err)})
 		return
 	}
 
+	// If we get here, we have valid file data to send
 	// Get metadata for the content disposition header
 	meta, err := s.distStorage.GetMetadataByFilename(filename)
 	if err != nil {
@@ -205,6 +212,7 @@ func (s *CoordinatorServer) handleDownloadFile(c *gin.Context) {
 		c.Header("Content-Disposition", "attachment; filename="+downloadFilename)
 	}
 	
+	// Set binary content type for actual file download
 	c.Header("Content-Type", "application/octet-stream")
 	c.Data(http.StatusOK, "application/octet-stream", fileData)
 }

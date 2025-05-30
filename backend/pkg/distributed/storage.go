@@ -47,6 +47,22 @@ type UploadedChunk struct {
 	ServerID string
 }
 
+//ChunkHash represents a chunk's hash information
+type ChunkHash struct {
+	ChunkID string `json:"chunk_id"`
+	Hash string `json:"hash"`
+	Size int64 `json:"size"`
+}
+//ReplicaAnalysis holds the analysis results for repair detection
+type ReplicaAnalysis struct {
+	HealthyNodes []string
+	UnhealthyNodes []string
+	MissingData []string // healthy nodes that are missing chunk data
+	CorruptedData []string // healthy nodes with corrupted data
+	NeedsRepair []string // all nodes that need repair
+	PrimaryForRepair string // best node to use as source for repair
+	ReferenceHash string // correct hash for particular chunk
+}
 // NewDistributedStorageWithClientManager creates a new distributed storage with a provided client manager
 func NewDistributedStorageWithClientManager(metadataService metadata.MetadataService, clientManager httpclient.ClientManagerInterface, parentLogger *logging.Logger) *DistributedStorage {
 	// Always create a dedicated logger for distributed storage
@@ -405,13 +421,14 @@ func (ds *DistributedStorage) Upload(file io.Reader, filename string) (string, e
 			// ds.failedServersMutex.Unlock()
 			
 			// Cleanup and return error
-			for _, uploadedChunk := range uploadedChunks {
-				if err := ds.replicationHandler.DeleteChunk(uploadedChunk.ChunkID); err != nil {
-					ds.logger.Error("Failed to clean up chunk after upload failure",
-					zap.String("chunkID", uploadedChunk.ChunkID),
-					zap.Error(err))
-				}
-			}
+			// for _, uploadedChunk := range uploadedChunks {
+			// 	if err := ds.replicationHandler.DeleteChunk(uploadedChunk.ChunkID); err != nil {
+			// 		ds.logger.Error("Failed to clean up chunk after upload failure",
+			// 		zap.String("chunkID", uploadedChunk.ChunkID),
+			// 		zap.Error(err))
+			// 	}
+			// }
+			ds.cleanupPartialUpload(uploadedChunks, filename)
 			return "", fmt.Errorf("failed to upload chunk %d: %w", i, err)
 		}
 
@@ -448,13 +465,14 @@ func (ds *DistributedStorage) Upload(file io.Reader, filename string) (string, e
 			zap.String("fileID", fileID),
 			zap.Error(err))
 		// cleanup chunks as metadata couldn't be saved
-		for _, chunk := range uploadedChunks {
-			if err := ds.replicationHandler.DeleteChunk(chunk.ChunkID); err != nil {
-				ds.logger.Error("Failed to clean up chunk after metadata storage failure",
-				zap.String("chunkID", chunk.ChunkID),
-				zap.Error(err))
-			}
-		}
+		// for _, chunk := range uploadedChunks {
+		// 	if err := ds.replicationHandler.DeleteChunk(chunk.ChunkID); err != nil {
+		// 		ds.logger.Error("Failed to clean up chunk after metadata storage failure",
+		// 		zap.String("chunkID", chunk.ChunkID),
+		// 		zap.Error(err))
+		// 	}
+		// }
+		ds.cleanupPartialUpload(uploadedChunks, filename)
 		return "", fmt.Errorf("failed to save metadata: %w", err)
 	}
 	ds.logger.Info("File upload complete successfully",
@@ -563,67 +581,52 @@ func (ds *DistributedStorage) Download(filename string, version int) ([]byte, er
 		return nil, fmt.Errorf("file %s has no chunks", filename)
 	}
 
-	// Download all chunks
+	ds.logger.Info("Starting file download with replica repair capability",
+		zap.String("filename", filename),
+		zap.Int("version", version),
+		zap.Int("chunkCount", len(chunks)))
+
+	// Download all chunks with repair capability
 	chunksData := make(map[int][]byte)
 	var downloadErrors []string
 	unavailableChunks := 0
+	repairedChunks := 0
 
 	for _, chunk := range chunks {
-		//serverID := chunk.ServerID
 		chunkID := chunk.ChunkID
 		chunkIndex := chunk.ChunkIndex
 
-		// Check if the server is marked as failed
-		// if ds.failedServers[serverID] {
-		// 	unavailableChunks++
-		// 	downloadErrors = append(downloadErrors, fmt.Sprintf("chunk %d unavailable: server %s is down", chunkIndex, serverID))
-		// 	continue
-		// }
-
-		// // Get the client for this server
-		// client, err := ds.clientManager.GetClient(serverID)
-		// if err != nil {
-		// 	unavailableChunks++
-		// 	downloadErrors = append(downloadErrors, fmt.Sprintf("chunk %d unavailable: cannot connect to server %s", chunkIndex, serverID))
-		// 	// Mark server as failed for future reference
-		// 	ds.failedServers[serverID] = true
-		// 	continue
-		// }
-
-		// Download the chunk
-		// chunkReader, err := client.DownloadChunk(chunkID)
-		// if err != nil {
-		// 	unavailableChunks++
-		// 	downloadErrors = append(downloadErrors, fmt.Sprintf("chunk %d download failed from server %s: %v", chunkIndex, serverID, err))
-			
-		// 	// Only mark the server as failed if it's an HTTP connection error, not a "not found" error
-		// 	if !strings.Contains(err.Error(), "not found") {
-		// 		ds.failedServers[serverID] = true
-		// 	}
-		// 	continue
-		// }
-		reader, err := ds.replicationHandler.HealthAwareReplicatedDownload(chunkID)
+		// try to download chunk with repair capability
+		chunkData, repaired, err := ds.downloadChunkWithRepair(chunkID, filename)
 		if err != nil {
 			unavailableChunks++
 			downloadErrors = append(downloadErrors, fmt.Sprintf("chunk %d download failed: %v", chunkIndex, err))
+			ds.logger.Error("Failed to download chunk even with repair attempts",
+				zap.String("filename", filename),
+				zap.String("chunkID", chunkID),
+				zap.Int("chunkIndex", chunkIndex),
+				zap.Error(err))
 			continue
 		}
-		// Convert ReadCloser to []byte
-		chunkData, err := io.ReadAll(reader)
-		reader.Close() // Don't forget to close the reader
-		if err != nil {
-			unavailableChunks++
-			downloadErrors = append(downloadErrors, fmt.Sprintf("chunk %d read failed: %v", chunkIndex, err))
-			continue
+		if repaired {
+			repairedChunks++
 		}
-
 		chunksData[chunkIndex] = chunkData
+		ds.logger.Debug("Successfully downloaded chunk",
+			zap.String("filename", filename),
+			zap.String("chunkID", chunkID),
+			zap.Int("chunkIndex", chunkIndex),
+			zap.Int("chunkSize", len(chunkData)),
+			zap.Bool("wasRepaired", repaired))
 	}
 
-	// Check if we have all chunks
+	// check if we have all chunks
 	if unavailableChunks > 0 {
-		return nil, fmt.Errorf("file %s incomplete: %d of %d chunks unavailable. Errors: %s", 
-			filename, unavailableChunks, len(chunks), strings.Join(downloadErrors, "; "))
+		ds.logger.Error("File download incomplete due to missing chunks",
+			zap.String("filename", filename),
+			zap.Int("unavailableChunks", unavailableChunks),
+			zap.Int("totalChunks", len(chunks)))
+		return nil, fmt.Errorf("file %s incomplete: %d of %d chunks unavailable. Errors: %s", filename, unavailableChunks, len(chunks), strings.Join(downloadErrors, "; "))
 	}
 
 	// Reassemble the file in correct order
@@ -636,9 +639,265 @@ func (ds *DistributedStorage) Download(filename string, version int) ([]byte, er
 		fileData = append(fileData, chunkData...)
 	}
 
+	ds.logger.Info("File download completed successfully",
+		zap.String("filename", filename),
+		zap.Int("version", version),
+		zap.Int("totalSize", len(fileData)),
+		zap.Int("repairedChunks", repairedChunks))
+
 	return fileData, nil
 }
 
+func (ds *DistributedStorage) downloadChunkWithRepair(chunkID string, filename string) ([]byte, bool, error) {
+	status, err := ds.replicationHandler.GetReplicationStatus(chunkID)
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to get replication status: %w", err)
+	}
+
+	ds.logger.Debug("Starting download with repair capability",
+		zap.String("filename", filename),
+		zap.String("chunkID", chunkID),
+		zap.String("primaryNode", status.PrimaryNode),
+		zap.Strings("replicaNodes", status.ReplicaNodes))
+
+	// First analyze the current state of replicas
+	analysis := ds.analyzeReplicasForRepair(status, filename, chunkID)
+	
+	// try health aware download first
+	reader, err := ds.replicationHandler.HealthAwareReplicatedDownload(chunkID)
+	if err == nil {
+		chunkData, readErr := io.ReadAll(reader)
+		reader.Close()
+		if readErr == nil {
+			ds.logger.Debug("Successfully downloaded chunk",
+				zap.String("filename", filename),
+				zap.String("chunkID", chunkID))
+
+			// If we got data but some nodes need repair, trigger repair
+			if len(analysis.NeedsRepair) > 0 {
+				ds.logger.Info("Download successful but repair needed",
+					zap.String("filename", filename),
+					zap.String("chunkID", chunkID),
+					zap.Strings("nodesToRepair", analysis.NeedsRepair))
+
+				// Start repair in background
+				go func() {
+					repairErr := ds.replicationHandler.RepairReplicas(chunkID, analysis.PrimaryForRepair, analysis.NeedsRepair, filename)
+					if repairErr != nil {
+						ds.logger.Error("Background repair failed",
+							zap.String("filename", filename),
+							zap.String("chunkID", chunkID),
+							zap.Error(repairErr))
+					} else {
+						ds.logger.Info("Background repair completed successfully",
+							zap.String("filename", filename),
+							zap.String("chunkID", chunkID))
+					}
+				}()
+				return chunkData, true, nil
+			}
+			return chunkData, false, nil
+		}
+	}
+
+	ds.logger.Info("Initial download failed, falling back to repair process",
+		zap.String("filename", filename),
+		zap.String("chunkID", chunkID),
+		zap.Error(err))
+
+	//No healthy nodes return error
+	if len(analysis.HealthyNodes) == 0 {
+		return nil, false, fmt.Errorf("no healthy nodes with valid data found for chunk %s", chunkID)
+	}
+
+	// Download from healthy node
+	var chunkData []byte
+	for _, healthyNode := range analysis.HealthyNodes {
+		client, err := ds.clientManager.GetClient(healthyNode)
+		if err != nil {
+			continue
+		}
+		reader, err := client.DownloadChunk(chunkID)
+		if err != nil {
+			continue
+		}
+		chunkData, err = io.ReadAll(reader)
+		reader.Close()
+		if err == nil {
+			ds.logger.Debug("Successfully downloaded chunk from healthy node",
+				zap.String("filename", filename),
+				zap.String("chunkID", chunkID),
+				zap.String("healthyNode", healthyNode))
+			break
+		}
+	}
+
+	if chunkData == nil {
+		return nil, false, fmt.Errorf("failed to download chunk from any healthy node")
+	}
+
+	// perform repair if needed
+	repairPerformed := false
+	if len(analysis.NeedsRepair) > 0 {
+		ds.logger.Info("Performing replica repair",
+			zap.String("filename", filename),
+			zap.String("chunkID", chunkID),
+			zap.Strings("nodesToRepair", analysis.NeedsRepair),
+			zap.String("primaryForRepair", analysis.PrimaryForRepair))
+		repairErr := ds.replicationHandler.RepairReplicas(chunkID, analysis.PrimaryForRepair, analysis.NeedsRepair, filename)
+		if repairErr != nil {
+			ds.logger.Warn("Repair failed",
+				zap.String("filename", filename),
+				zap.String("chunkID", chunkID),
+				zap.Error(repairErr))
+		} else {
+			repairPerformed = true
+			ds.logger.Info("Successfully repaired replicas",
+				zap.String("filename", filename),
+				zap.String("chunkID", chunkID))
+		}
+	}
+	return chunkData, repairPerformed, nil
+}
+
+// analyzeReplicasForRepair determines which replicas need repair using hash comparison
+func (ds *DistributedStorage) analyzeReplicasForRepair(status replication.ReplicationStatus, filename string, chunkID string) ReplicaAnalysis {
+	allNodes := append([]string{status.PrimaryNode}, status.ReplicaNodes...)
+	analysis := ReplicaAnalysis{
+		HealthyNodes: make([]string, 0),
+		UnhealthyNodes: make([]string, 0),
+		MissingData: make([]string, 0),
+		CorruptedData: make([]string, 0),
+		NeedsRepair: make([]string, 0),
+	}
+
+	ds.logger.Debug("Starting hash-based replica analysis",
+		zap.String("filename", filename),
+		zap.String("chunkID", chunkID),
+		zap.Strings("allNodes", allNodes))
+
+	// Collect hashes from all healthy nodes
+	nodeHashes := make(map[string]*ChunkHash)
+	var referenceHash string
+
+	for _, node := range allNodes {
+		nodeHealth, err := ds.clientManager.GetNodeHealth(node)
+
+		if err != nil || !nodeHealth.Healthy {
+			ds.logger.Debug("Node is unhealthy",
+				zap.String("filename", filename),
+				zap.String("chunkID", chunkID),
+				zap.String("node", node),
+				zap.Error(err))
+			analysis.UnhealthyNodes = append(analysis.UnhealthyNodes, node)
+			analysis.NeedsRepair = append(analysis.NeedsRepair, node)
+			continue
+		}
+
+		// get chunk from healthy node
+		chunkHash, hashErr := ds.getChunkHashFromNode(node, chunkID, filename)
+		if hashErr != nil {
+			ds.logger.Warn("Failed to get chunk hash from healthy node",
+				zap.String("filename", filename),
+				zap.String("chunkID", chunkID),
+				zap.String("node", node),
+				zap.Error(hashErr))
+			analysis.MissingData = append(analysis.MissingData, node)
+			analysis.NeedsRepair = append(analysis.NeedsRepair, node)
+			continue
+		}
+		nodeHashes[node] = chunkHash
+		if referenceHash == "" || node == status.PrimaryNode {
+			referenceHash = chunkHash.Hash
+		}
+	}
+
+	//compare hashes and categorize nodes
+	for node, hash := range nodeHashes {
+		if hash.Hash == referenceHash {
+			analysis.HealthyNodes = append(analysis.HealthyNodes, node)
+			ds.logger.Debug("Node has correct chunk data",
+				zap.String("filename", filename),
+				zap.String("chunkID", chunkID),
+				zap.String("node", node),
+				zap.String("hash", hash.Hash[:8])) // log first 8 chars of hash
+
+		} else {
+			ds.logger.Warn("Node has corrupted chunk data (hash mismatch)",
+				zap.String("filename", filename),
+				zap.String("chunkID", chunkID),
+				zap.String("node", node),
+				zap.String("expectedHash", referenceHash[:8]),
+				zap.String("actualHash", hash.Hash[:8]))
+			analysis.CorruptedData = append(analysis.CorruptedData, node)
+			analysis.NeedsRepair = append(analysis.NeedsRepair, node)
+		}
+	}
+	// handle cases where we have no valid reference
+	if referenceHash == "" {
+		ds.logger.Error("No valid chunk data found on any node",
+			zap.String("filename", filename),
+			zap.String("chunkID", chunkID))
+		return analysis
+	}
+
+	// select primary for repair
+	if contains(analysis.HealthyNodes, status.PrimaryNode) {
+		analysis.PrimaryForRepair = status.PrimaryNode
+	} else if len(analysis.HealthyNodes) > 0 {
+		analysis.PrimaryForRepair = analysis.HealthyNodes[0]
+	}
+	analysis.ReferenceHash = referenceHash
+
+	ds.logger.Info("Hash-based replica analysis completed",
+		zap.String("filename", filename),
+		zap.String("chunkID", chunkID),
+		zap.String("referenceHash", referenceHash[:8]),
+		zap.Strings("healthyNodes", analysis.HealthyNodes),
+		zap.Strings("unhealthyNodes", analysis.UnhealthyNodes),
+		zap.Strings("missingData", analysis.MissingData),
+		zap.Strings("corruptedData", analysis.CorruptedData),
+		zap.Strings("needsREpair", analysis.NeedsRepair),
+		zap.String("primaryForRepair", analysis.PrimaryForRepair))
+	return analysis
+}
+// getChunkHashFromNode retrieves the hash of a chunk from a specific node
+func (ds *DistributedStorage) getChunkHashFromNode(nodeID, chunkID, filename string) (*ChunkHash, error) {
+    client, err := ds.clientManager.GetClient(nodeID)
+    if err != nil {
+        return nil, fmt.Errorf("failed to get client for node %s: %w", nodeID, err)
+    }
+
+    // For now, compute hash locally by downloading and hashing
+    // TODO: Add dedicated hash endpoint to storage nodes for efficiency
+    return ds.computeChunkHashFromNode(client, chunkID, filename)
+}
+
+// computeChunkHashFromNode downloads chunk and computes hash locally
+func (ds *DistributedStorage) computeChunkHashFromNode(client httpclient.NodeStorageClient, chunkID, filename string) (*ChunkHash, error) {
+	reader, err := client.DownloadChunk(chunkID)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "404") {
+			return nil, fmt.Errorf("chunk not found")
+		}
+		return nil, fmt.Errorf("failed to download chunk: %w", err)
+	}
+	defer reader.Close()
+
+	// compute hash while reading
+	hasher := sha256.New()
+	size, err := io.Copy(hasher, reader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read chunk data: %w", err)
+	}
+
+	hash := hex.EncodeToString(hasher.Sum(nil))
+	return &ChunkHash{
+		ChunkID: chunkID,
+		Hash: hash,
+		Size: size,
+	}, nil
+}
 // Custom ReadCloser to ensure underlying chunk streams are closed
 // type chunkClosingReadCloser struct {
 // 	reader  io.Reader
@@ -897,7 +1156,7 @@ func (ds *DistributedStorage) GetClientManager() httpclient.ClientManagerInterfa
 }
 
 // cleanupPartialUpload deletes chunks that were successfully uploaded during a failed upload
-func (ds *DistributedStorage) cleanupPartialUpload(chunks []UploadedChunk, filename string) {
+func (ds *DistributedStorage) cleanupPartialUpload(chunks []chunk.ChunkMetadata, filename string) {
 	if len(chunks) == 0 {
 		return
 	}
@@ -907,13 +1166,19 @@ func (ds *DistributedStorage) cleanupPartialUpload(chunks []UploadedChunk, filen
 		zap.Int("chunkCount", len(chunks)))
 	
 	// Track failures for reporting
-	var failedCleanups []UploadedChunk
+	var failedCleanups []string
 	
-	// Delete each chunk
-	for _, chunk := range chunks {
-		success := ds.attemptChunkDeletion(chunk)
-		if !success {
-			failedCleanups = append(failedCleanups, chunk)
+	// Delete each chunk using replication handler
+	for _, chunkMeta := range chunks {
+		err := ds.replicationHandler.DeleteChunk(chunkMeta.ChunkID)
+		if err != nil {
+			ds.logger.Error("Failed to clean up chunk after upload failure",
+			zap.String("chunkID", chunkMeta.ChunkID),
+			zap.Error(err))
+			failedCleanups = append(failedCleanups, chunkMeta.ChunkID)
+		} else {
+			ds.logger.Debug("Successfully cleaned up chunk",
+				zap.String("chunkID", chunkMeta.ChunkID))
 		}
 	}
 	
@@ -922,11 +1187,6 @@ func (ds *DistributedStorage) cleanupPartialUpload(chunks []UploadedChunk, filen
 		ds.logger.Warn("WARNING: Cleanup partially failed for chunks", 
 			zap.Int("failedCount", len(failedCleanups)),
 			zap.Int("totalCount", len(chunks)))
-		for _, chunk := range failedCleanups {
-			ds.logger.Info("  - Failed to clean up", 
-				zap.String("chunkID", chunk.ChunkID),
-				zap.String("serverID", chunk.ServerID))
-		}
 	} else {
 		ds.logger.Info("Successfully cleaned up all chunks for failed upload", 
 			zap.String("filename", filename),
@@ -999,4 +1259,13 @@ func (ds *DistributedStorage) MarkServerRecovered(serverID string) {
 	delete(ds.failedServers, serverID)
 	ds.logger.Info("Server marked as recovered", 
 		zap.String("serverID", serverID))
+}
+
+func contains(slice []string, item string) bool {
+	for _,s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
 }
