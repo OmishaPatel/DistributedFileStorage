@@ -1,6 +1,7 @@
 package server
 
 import (
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"backend/pkg/distributed"
 	"backend/pkg/logging"
 	"backend/pkg/metadata"
@@ -88,6 +89,9 @@ func (s *CoordinatorServer) setupRoutes() {
 	
 	// Basic health check
 	s.router.GET("/health", s.handleHealthCheck)
+
+	//Prometheus metrics endpoint
+	s.router.GET("/metrics", gin.WrapH(promhttp.Handler()))
 	
 	// Advanced system monitoring
 	s.setupHealthEndpoints(s.router)

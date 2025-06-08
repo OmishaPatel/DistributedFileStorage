@@ -8,11 +8,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-
 	"backend/pkg/logging"
 	"backend/pkg/storage"
-
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
 )
 
@@ -112,6 +111,9 @@ func (s *StorageNodeServer) setupRoutes() {
 	s.router.GET("/chunks/:chunkID", s.handleChunkDownload)
 	s.router.DELETE("/chunks/:chunkID", s.handleChunkDelete)
 	s.router.GET("/health", s.handleHealthCheck)
+
+	// Add metric endpoint
+	s.router.GET("/metrics", gin.WrapH(promhttp.Handler()))
 }
 
 // handleChunkUpload handles individual chunk uploads from the coordinator
