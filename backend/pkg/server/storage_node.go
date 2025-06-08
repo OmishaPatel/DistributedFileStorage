@@ -98,6 +98,8 @@ func NewStorageNodeServer(config StorageNodeConfig) (*StorageNodeServer, error) 
 		uploadDir: config.UploadDir,
 		logger:    nodeLogger,
 	}
+	
+	server.router.Use(MetricsMiddleware(config.ServerID))
 
 	server.setupRoutes()
 	return server, nil

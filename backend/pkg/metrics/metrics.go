@@ -38,7 +38,7 @@ var (
 	HTTPErrorsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "http_errors_total",
 		Help: "Total number of HTTP errors",
-	}, []string{"method", "endpoint", "status_code", "server_id"})
+	}, []string{"method", "endpoint", "status_code", "error_type", "server_id"})
 
 	StorageErrorsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "storage_errors_total",
@@ -71,5 +71,23 @@ var (
 	ClusterHealth = promauto.NewGauge(prometheus.GaugeOpts{
 		Name: "cluster_health_Score",
 		Help: "Overall cluster health score (0-1, 1-healthy)",
+	})
+)
+
+// File Operations
+var (
+	FileUploadsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "file_uploads_total",
+		Help: "Total number of file uploads",
+	})
+
+	FileDownloadsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "file_downloads_total",
+		Help: "Total number of file downloads",
+	})
+
+	FileDeletionsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "file_deletions_total",
+		Help: "Total number of file deletions",
 	})
 )

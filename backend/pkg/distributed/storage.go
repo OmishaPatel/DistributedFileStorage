@@ -21,7 +21,7 @@ import (
 	"backend/pkg/metadata"
 	"backend/pkg/models"
 	"backend/pkg/replication"
-
+	"backend/pkg/metrics"
 	"go.uber.org/zap"
 )
 
@@ -190,8 +190,10 @@ func (ds *DistributedStorage) SetHealthCheckInterval(interval time.Duration) {
 func (ds *DistributedStorage) checkAllServersHealth() {
 	ds.logger.Info("Performing periodic health check of all storage nodes")
 	
+	healthyNodes := 0
+	totalNodes := 4
 	// Get all server IDs from the client manager
-	for i := 1; i <= 4; i++ {
+	for i := 1; i <= totalNodes; i++ {
 		serverID := fmt.Sprintf("server%d", i)
 		
 		// Get client for this server
@@ -203,6 +205,8 @@ func (ds *DistributedStorage) checkAllServersHealth() {
 			ds.failedServersMutex.Lock()
 			ds.failedServers[serverID] = true
 			ds.failedServersMutex.Unlock()
+
+			metrics.NodeAvailability.WithLabelValues(serverID).Set(0)
 			continue
 		}
 		
@@ -221,6 +225,7 @@ func (ds *DistributedStorage) checkAllServersHealth() {
 				
 			}
 			ds.failedServersMutex.Unlock()
+			metrics.NodeAvailability.WithLabelValues(serverID).Set(0)
 		} else {
 			ds.failedServersMutex.Lock()
 			if ds.failedServers[serverID] {
@@ -230,9 +235,13 @@ func (ds *DistributedStorage) checkAllServersHealth() {
 				delete(ds.failedServers, serverID)
 			}
 				ds.failedServersMutex.Unlock()
+				metrics.NodeAvailability.WithLabelValues(serverID).Set(1)
 			
 		}
 	}
+	//Update cluster health score
+	clusterHealthScore := float64(healthyNodes) / float64(totalNodes)
+	metrics.ClusterHealth.Set(clusterHealthScore)
 	
 	// Log summary of available servers
 	// Lock while reading

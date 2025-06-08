@@ -1,10 +1,10 @@
 package server
 
 import (
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"backend/pkg/distributed"
 	"backend/pkg/logging"
 	"backend/pkg/metadata"
+	"backend/pkg/metrics"
 	"errors"
 	"fmt"
 	"log"
@@ -14,6 +14,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -76,6 +79,7 @@ func NewCoordinatorServer(config CoordinatorConfig) (*CoordinatorServer,  error)
 		logger: distLogger,
 	}
 
+	server.router.Use(MetricsMiddleware(config.ServerID))
 	server.setupRoutes()
 	return server, nil
 }
@@ -98,10 +102,14 @@ func (s *CoordinatorServer) setupRoutes() {
 }
 
 func (s *CoordinatorServer) handleUploadFile(c *gin.Context) {
-	file, err := c.FormFile("file")
+	timer := prometheus.NewTimer(metrics.StorageOperationDuration.WithLabelValues("upload", s.serverID))
+	defer timer.ObserveDuration()
 
+
+	file, err := c.FormFile("file")
 	if err != nil {
 		s.logger.Error("Bad request when uploading file", zap.Error(err))
+		metrics.StorageErrorsTotal.WithLabelValues("upload", "bad_request", s.serverID).Inc()
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -114,6 +122,7 @@ func (s *CoordinatorServer) handleUploadFile(c *gin.Context) {
 		s.logger.Error("Failed to open uploaded file", 
 			zap.String("filename", sanitizedFileName), 
 			zap.Error(err))
+		metrics.StorageErrorsTotal.WithLabelValues("upload", "file_open_error", s.serverID).Inc()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -127,6 +136,7 @@ func (s *CoordinatorServer) handleUploadFile(c *gin.Context) {
 		s.logger.Error("Distributed upload failed", 
 			zap.String("filename", sanitizedFileName), 
 			zap.Error(err))
+		metrics.StorageErrorsTotal.WithLabelValues("upload", "distributed_error", s.serverID).Inc()
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": fmt.Sprintf("Upload failed: %v", err),
 			"detail": err.Error(),
@@ -137,6 +147,8 @@ func (s *CoordinatorServer) handleUploadFile(c *gin.Context) {
 	s.logger.Info("Distributed upload completed", 
 		zap.String("filename", sanitizedFileName), 
 		zap.String("fileID", fileID))
+	metrics.FileUploadsTotal.Inc()
+	metrics.DataTransferBytesTotal.WithLabelValues("upload", s.serverID).Add(float64(file.Size))
 	c.JSON(http.StatusOK, gin.H{
 		"message":    "File uploaded successfully",
 		"fileID":     fileID,
@@ -145,6 +157,10 @@ func (s *CoordinatorServer) handleUploadFile(c *gin.Context) {
 }
 
 func (s *CoordinatorServer) handleDownloadFile(c *gin.Context) {
+
+	timer := prometheus.NewTimer(metrics.StorageOperationDuration.WithLabelValues("download", s.serverID))
+	defer timer.ObserveDuration()
+
 	filename := c.Param("filename")
 	versionQuery := c.Query("version")
 
@@ -154,6 +170,7 @@ func (s *CoordinatorServer) handleDownloadFile(c *gin.Context) {
 	if versionQuery != "" {
 		version, err = strconv.Atoi(versionQuery)
 		if err != nil {
+			metrics.StorageErrorsTotal.WithLabelValues("download", "invalid_version", s.serverID).Inc()
 			c.Header("Content-Type", "application/json")
 			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "Invalid version number format"})
 			return
@@ -177,6 +194,7 @@ func (s *CoordinatorServer) handleDownloadFile(c *gin.Context) {
 		// Check for specific error types and return appropriate JSON responses
 		c.Header("Content-Type", "application/json")
 		if errors.Is(err, os.ErrNotExist) {
+			metrics.StorageErrorsTotal.WithLabelValues("download", "file_not_found", s.serverID).Inc()
 			if version > 0 {
 				c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("Version %d of file '%s' does not exist", version, filename)})
 			} else {
@@ -187,6 +205,7 @@ func (s *CoordinatorServer) handleDownloadFile(c *gin.Context) {
 		
 		// Check if the error message contains something about "unavailable" or "incomplete"
 		if strings.Contains(err.Error(), "incomplete") || strings.Contains(err.Error(), "unavailable") {
+			metrics.StorageErrorsTotal.WithLabelValues("download", "node_unavailable", s.serverID).Inc()
 			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
 				"error": "File is currently unavailable due to storage node failures",
 				"detail": err.Error(),
@@ -194,6 +213,7 @@ func (s *CoordinatorServer) handleDownloadFile(c *gin.Context) {
 			return
 		}
 		
+		metrics.StorageErrorsTotal.WithLabelValues("download", "internal_error", s.serverID).Inc()
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to download file: %v", err)})
 		return
 	}
@@ -218,6 +238,7 @@ func (s *CoordinatorServer) handleDownloadFile(c *gin.Context) {
 	
 	// Set binary content type for actual file download
 	c.Header("Content-Type", "application/octet-stream")
+	metrics.FileDownloadsTotal.Inc()
 	c.Data(http.StatusOK, "application/octet-stream", fileData)
 }
 
@@ -250,6 +271,7 @@ func (s *CoordinatorServer) handleDeleteFile(c *gin.Context) {
 	s.logger.Info("Successfully deleted file", 
 		zap.String("filename", filename), 
 		zap.String("serverID", s.serverID))
+	metrics.FileDeletionsTotal.Inc()
 	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("%s deleted successfully", filename)})
 }
 
