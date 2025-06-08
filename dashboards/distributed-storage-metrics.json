@@ -15,7 +15,8 @@
     {
       "id": 1,
       "title": "Request Rate (req/sec)",
-      "type": "graph",
+      "type": "timeseries",
+      "datasource": "Prometheus",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
       "targets": [
         {
@@ -23,34 +24,13 @@
           "legendFormat": "{{server_id}}",
           "refId": "A"
         }
-      ],
-      "yaxes": [
-        {
-          "format": "short",
-          "label": "Requests/sec",
-          "logBase": 1,
-          "min": 0,
-          "show": true
-        },
-        {
-          "format": "short",
-          "show": true
-        }
-      ],
-      "legend": {
-        "show": true,
-        "values": false,
-        "current": false,
-        "max": false,
-        "min": false,
-        "avg": false,
-        "total": false
-      }
+      ]
     },
     {
       "id": 2,
       "title": "Response Time 95th Percentile",
-      "type": "graph",
+      "type": "timeseries",
+      "datasource": "Prometheus",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
       "targets": [
         {
@@ -58,25 +38,13 @@
           "legendFormat": "{{server_id}} - 95th percentile",
           "refId": "A"
         }
-      ],
-      "yaxes": [
-        {
-          "format": "s",
-          "label": "Seconds",
-          "logBase": 1,
-          "min": 0,
-          "show": true
-        },
-        {
-          "format": "short",
-          "show": true
-        }
       ]
     },
     {
       "id": 3,
       "title": "Error Rate",
-      "type": "graph",
+      "type": "timeseries",
+      "datasource": "Prometheus",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
       "targets": [
         {
@@ -84,25 +52,13 @@
           "legendFormat": "{{server_id}} errors",
           "refId": "A"
         }
-      ],
-      "yaxes": [
-        {
-          "format": "short",
-          "label": "Errors/sec",
-          "logBase": 1,
-          "min": 0,
-          "show": true
-        },
-        {
-          "format": "short",
-          "show": true
-        }
       ]
     },
     {
       "id": 4,
       "title": "Node Health Status",
       "type": "stat",
+      "datasource": "Prometheus",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
       "targets": [
         {
@@ -143,7 +99,8 @@
     {
       "id": 5,
       "title": "CPU Usage by Server",
-      "type": "graph",
+      "type": "timeseries",
+      "datasource": "Prometheus",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
       "targets": [
         {
@@ -151,26 +108,13 @@
           "legendFormat": "{{instance}} CPU %",
           "refId": "A"
         }
-      ],
-      "yaxes": [
-        {
-          "format": "percent",
-          "label": "CPU Usage %",
-          "logBase": 1,
-          "min": 0,
-          "max": 100,
-          "show": true
-        },
-        {
-          "format": "short",
-          "show": true
-        }
       ]
     },
     {
       "id": 6,
       "title": "Memory Usage by Server",
-      "type": "graph",
+      "type": "timeseries",
+      "datasource": "Prometheus",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
       "targets": [
         {
@@ -178,25 +122,13 @@
           "legendFormat": "{{instance}} Memory (MB)",
           "refId": "A"
         }
-      ],
-      "yaxes": [
-        {
-          "format": "bytes",
-          "label": "Memory Usage",
-          "logBase": 1,
-          "min": 0,
-          "show": true
-        },
-        {
-          "format": "short",
-          "show": true
-        }
       ]
     },
     {
       "id": 7,
       "title": "Request Rate by Endpoint",
-      "type": "graph",
+      "type": "timeseries",
+      "datasource": "Prometheus",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
       "targets": [
         {
@@ -204,25 +136,13 @@
           "legendFormat": "{{endpoint}}",
           "refId": "A"
         }
-      ],
-      "yaxes": [
-        {
-          "format": "short",
-          "label": "Requests/sec",
-          "logBase": 1,
-          "min": 0,
-          "show": true
-        },
-        {
-          "format": "short",
-          "show": true
-        }
       ]
     },
     {
       "id": 8,
       "title": "Response Time by Endpoint",
-      "type": "graph",
+      "type": "timeseries",
+      "datasource": "Prometheus",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
       "targets": [
         {
@@ -230,25 +150,13 @@
           "legendFormat": "{{endpoint}} - 95th percentile",
           "refId": "A"
         }
-      ],
-      "yaxes": [
-        {
-          "format": "s",
-          "label": "Response Time (seconds)",
-          "logBase": 1,
-          "min": 0,
-          "show": true
-        },
-        {
-          "format": "short",
-          "show": true
-        }
       ]
     },
     {
       "id": 9,
       "title": "Active Connections",
-      "type": "graph",
+      "type": "timeseries",
+      "datasource": "Prometheus",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
       "targets": [
         {
@@ -256,70 +164,19 @@
           "legendFormat": "{{server_id}} connections",
           "refId": "A"
         }
-      ],
-      "yaxes": [
-        {
-          "format": "short",
-          "label": "Active Connections",
-          "logBase": 1,
-          "min": 0,
-          "show": true
-        },
-        {
-          "format": "short",
-          "show": true
-        }
       ]
     },
     {
       "id": 10,
-      "title": "Storage Usage",
-      "type": "graph",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
-      "targets": [
-        {
-          "expr": "storage_used_bytes / 1024 / 1024 / 1024",
-          "legendFormat": "{{server_id}} Storage (GB)",
-          "refId": "A"
-        }
-      ],
-      "yaxes": [
-        {
-          "format": "bytes",
-          "label": "Storage Used (GB)",
-          "logBase": 1,
-          "min": 0,
-          "show": true
-        },
-        {
-          "format": "short",
-          "show": true
-        }
-      ]
-    },
-    {
-      "id": 11,
       "title": "Request Status Codes",
-      "type": "graph",
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 40 },
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
       "targets": [
         {
           "expr": "sum(rate(http_requests_total[1m])) by (status_code)",
           "legendFormat": "Status {{status_code}}",
           "refId": "A"
-        }
-      ],
-      "yaxes": [
-        {
-          "format": "short",
-          "label": "Requests/sec",
-          "logBase": 1,
-          "min": 0,
-          "show": true
-        },
-        {
-          "format": "short",
-          "show": true
         }
       ]
     }

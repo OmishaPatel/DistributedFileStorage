@@ -19,9 +19,10 @@ import (
 	"backend/pkg/chunk"
 	"backend/pkg/logging"
 	"backend/pkg/metadata"
+	"backend/pkg/metrics"
 	"backend/pkg/models"
 	"backend/pkg/replication"
-	"backend/pkg/metrics"
+
 	"go.uber.org/zap"
 )
 
@@ -227,6 +228,7 @@ func (ds *DistributedStorage) checkAllServersHealth() {
 			ds.failedServersMutex.Unlock()
 			metrics.NodeAvailability.WithLabelValues(serverID).Set(0)
 		} else {
+			healthyNodes ++
 			ds.failedServersMutex.Lock()
 			if ds.failedServers[serverID] {
 				ds.logger.Info("Server has RECOVERED", 
