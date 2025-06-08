@@ -35,6 +35,22 @@ services:
       - loki
     networks:
       - monitoring
+  prometheus:
+    image: prom/prometheus:v2.45.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tstb.path=/prometheus'
+      - '--storage.tstb.retention.time=7d'
+      - '--web.enable-lifecycle'
+    networks:
+      - monitoring
+    depends_on:
+      - grafana
 
 networks:
   monitoring:
@@ -42,3 +58,4 @@ networks:
 
 volumes:
   grafana-data: 
+  prometheus-data:
