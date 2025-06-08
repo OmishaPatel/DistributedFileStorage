@@ -7,10 +7,10 @@ datasources:
     url: http://loki:3100
     jsonData:
       maxLines: 1000
-    isDefault: true 
+    isDefault: true
 
   - name: Prometheus
     type: prometheus
     access: proxy
     url: http://prometheus:9090
-    isDefault: true
+    isDefault: false
