@@ -5,10 +5,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-
 	"backend/pkg/logging"
 	"backend/pkg/server"
-
 	"go.uber.org/zap"
 )
 
@@ -17,24 +15,20 @@ func main() {
 	uploadDir := flag.String("upload-dir", "./fileStorage/server3", "Directory to store uploaded files")
 	flag.Parse()
 
-	// Ensure the logs directory exists
-		// Ensure the logs directory exists
-		projectRoot := filepath.Join("..", "..", "..", "..")  // Go up from backend/cmd/server to project root
+	projectRoot := filepath.Join("..", "..", "..", "..")  // Go up from backend/cmd/server to project root
 	logDir := filepath.Join(projectRoot, "logs", "storage-node")
 	err := os.MkdirAll(logDir, 0755)
 	if err != nil {
 		log.Fatalf("Failed to create log directory: %v", err)
 	}
 
-	// Create logger for this storage node
 	logConfig := logging.LogConfig{
 		ServiceName: "individual-http-server3",
-		LogLevel:    "debug", // Use debug level to capture more details
+		LogLevel:    "info",
 		OutputPaths: []string{
 			"stdout",
 			filepath.Join(logDir, "individual-http-server3.log"),
 		},
-		Development: true,
 	}
 
 	logger, err := logging.GetLogger(logConfig)
@@ -43,13 +37,11 @@ func main() {
 	}
 	defer logger.Close()
 
-	// Log startup information
 	logger.Info("Starting Storage Node Server",
 		zap.String("serverID", "server3"),
 		zap.String("port", *port),
 		zap.String("uploadDir", *uploadDir))
 
-	// Create storage node server with logger
 	srv, err := server.NewStorageNodeServer(server.StorageNodeConfig{
 		ServerID:  "server3",
 		UploadDir: *uploadDir,

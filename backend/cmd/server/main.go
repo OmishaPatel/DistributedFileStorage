@@ -8,21 +8,16 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
-
 	httpclient "backend/internal/httpclient"
 	"backend/pkg/distributed"
 	"backend/pkg/logging"
 	"backend/pkg/metadata/memstore"
 	"backend/pkg/server"
-
 	"go.uber.org/zap"
 )
 
 func main() {
 	port := flag.String("port", "8080", "Port to run the server on")
-	// Main server doesn't need a specific serverID or uploadDir for distributed storage purpose
-	// serverID := flag.String("server-id", "main-coordinator", "Server ID") 
-	// uploadDir := flag.String("upload-dir", "./fileStorage/main", "Directory for coordinator (unused)")
 	flag.Parse()
 
 
@@ -38,7 +33,6 @@ func main() {
 			"stdout",
 			filepath.Join(logDir, "main-coordinator.log"),
 		},
-		Development: true,
 	}
 
 	logger, err := logging.GetLogger(logConfig)
@@ -47,7 +41,6 @@ func main() {
 	}
 	defer logger.Close()
 
-	// Log startup information
 	logger.Info("Starting Distributed Storage Coordinator",
 		zap.String("port", *port))
 

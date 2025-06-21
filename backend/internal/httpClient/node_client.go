@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"time"
-
 	"github.com/cenkalti/backoff/v4"
 	"github.com/sony/gobreaker"
 )
@@ -58,15 +57,14 @@ func NewNodeClient(serverID string, client *http.Client, config ClientConfig) (N
 	// Circuit breaker configuration
 	cbSettings := gobreaker.Settings{
 		Name:        fmt.Sprintf("http-client-%s", serverID),
-		MaxRequests: 3,                  // Max requests allowed in half-open state
-		Interval:    10 * time.Second,   // Cyclic period of the closed state
-		Timeout:     5 * time.Second,   // Time after which circuit switches from open to half-open
+		MaxRequests: 5,                  // Max requests allowed in half-open state
+		Interval:    30 * time.Second,   // Cyclic period of the closed state
+		Timeout:     30 * time.Second,   // Time after which circuit switches from open to half-open
 		ReadyToTrip: func(counts gobreaker.Counts) bool {
-			// Trip condition: 2+ requests and more than 50% failures
-			return counts.Requests >= 2 && float64(counts.TotalFailures)/float64(counts.Requests) >= 0.5
+			// Trip condition: 10+ requests and more than 80% failures
+			return counts.Requests >= 10 && float64(counts.TotalFailures)/float64(counts.Requests) >= 0.8
 		},
 		OnStateChange: func(name string, from gobreaker.State, to gobreaker.State) {
-			// Log state changes
 			fmt.Printf("Circuit '%s' changed from '%s' to '%s'\n", name, from, to)
 		},
 	}
@@ -97,7 +95,7 @@ func (nc *NodeClient) executeUpload(chunkID string, data io.Reader) error {
 		// Prepare multipart form data
 		var requestBody bytes.Buffer
 		writer := multipart.NewWriter(&requestBody)
-		part, err := writer.CreateFormFile("file", chunkID) // Use chunkID as filename
+		part, err := writer.CreateFormFile("file", chunkID)
 		if err != nil {
 			return fmt.Errorf("failed to create form file for chunk %s: %w", chunkID, err)
 		}
@@ -128,8 +126,6 @@ func (nc *NodeClient) executeUpload(chunkID string, data io.Reader) error {
 			bodyBytes, _ := io.ReadAll(resp.Body)
 			return fmt.Errorf("upload chunk %s to %s failed with status %d: %s", chunkID, nc.baseURL, resp.StatusCode, string(bodyBytes))
 		}
-
-		// TODO: Optionally parse response if needed
 		return nil
 	}
 

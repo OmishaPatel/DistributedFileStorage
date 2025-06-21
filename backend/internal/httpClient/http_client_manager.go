@@ -3,13 +3,10 @@ package httpclient
 import (
 	"fmt"
 	"net/http"
-	// "net/url"
-	// "strings"
 	"sync"
 	"time"
 )
 
-// ClientManagerInterface defines operations that a client manager must support
 type ClientManagerInterface interface {
 	GetClient(serverID string) (NodeStorageClient, error)
 	GetNodeHealth(serverID string) (NodeHealth, error)
@@ -50,14 +47,6 @@ func NewClientManager(config ClientConfig) ClientManagerInterface {
 		MaxIdleConnsPerHost: config.MaxIdleConnsPerHost,
 		IdleConnTimeout:     90 * time.Second,
 		TLSHandshakeTimeout: 10 * time.Second,
-		// Add proxy configuration for server1
-		// Proxy: func(req *http.Request) (*url.URL, error) {
-		// 	// Check if this is a request to server1
-		// 	if strings.Contains(req.URL.Host, "localhost:8081") {
-		// 		return url.Parse("http://localhost:9081")
-		// 	}
-		// 	return nil, nil // No proxy for other servers
-		// },
 	}
 	
 	client := &http.Client{
@@ -128,7 +117,7 @@ func (cm *ClientManager) GetNodeHealth(serverID string) (NodeHealth, error) {
 		return health, err
 	}
 	
-	// Check if we can cast to access the circuit state methods
+	
 	if nc, ok := nodeClient.(*NodeClient); ok {
 		health.CircuitState = nc.CircuitState()
 		
@@ -163,7 +152,6 @@ func (cm *ClientManager) GetAllNodesHealth() NodesStatus {
 	
 	result := NodesStatus{}
 	
-	// Check each node in our cache
 	for serverID := range cm.nodeClients {
 		health, _ := cm.GetNodeHealth(serverID)
 		result.Nodes = append(result.Nodes, health)

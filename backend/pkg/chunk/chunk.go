@@ -18,11 +18,43 @@ type ChunkManager struct {
 	chunkSize int64
 }
 
+type chunkWithIndex struct {
+	index   int
+	reader  io.Reader
+	content []byte
+}
+
+type ChunkMetadata struct {
+	ChunkID       string `json:"chunk_id"`
+	ServerID      string `json:"server_id"`
+	ChunkSize     int64  `json:"chunk_size"`
+	ChunkIndex    int    `json:"chunk_index"`
+	ServerAddress string `json:"server_address"`
+	Version       int    `json:"version"`
+	PrimaryNode   string `json:"primary_node"`
+	ReplicaNodes  []string `json:"replica_nodes"`
+	LastModified int64 `json:"last_modified"`
+	OriginalName string `json:"filename"`
+}
 func NewChunkManager(chunkSize int64) *ChunkManager {
 	if chunkSize <= 0 {
 		chunkSize = DefaultChunkSize
 	}
 	return &ChunkManager{chunkSize: chunkSize}
+}
+
+func NewChunkMetadata(chunkID, serverID string, size int64, index int, address string) ChunkMetadata {
+	return ChunkMetadata{
+		ChunkID:       chunkID,
+		ServerID:      serverID,
+		ChunkSize:     size,
+		ChunkIndex:    index,
+		ServerAddress: address,
+		Version:       1,
+		PrimaryNode:  serverID,
+		ReplicaNodes: []string{},
+		LastModified: time.Now().Unix(),
+	}
 }
 
 func (cm *ChunkManager) SplitFile(file io.Reader, totalSize int64) ([]io.Reader, error) {
@@ -43,12 +75,6 @@ func (cm *ChunkManager) SplitFile(file io.Reader, totalSize int64) ([]io.Reader,
 		chunks[i] = io.LimitReader(file, cm.chunkSize)
 	}
 	return chunks, nil
-}
-
-type chunkWithIndex struct {
-	index   int
-	reader  io.Reader
-	content []byte
 }
 
 func (cm *ChunkManager) CombineChunks(chunks []io.Reader) io.Reader {
@@ -78,9 +104,6 @@ func (cm *ChunkManager) CombineChunks(chunks []io.Reader) io.Reader {
 		}
 	}
 
-	// Sort chunks by index to ensure correct order
-	// Note: Sorting here might be redundant if DistributedStorage.Download already sorted based on metadata index.
-	// However, it doesn't hurt to ensure order if the input slice wasn't guaranteed.
 	sort.Slice(chunkData, func(i, j int) bool {
 		return chunkData[i].index < chunkData[j].index
 	})
@@ -98,34 +121,4 @@ func (cm *ChunkManager) CombineChunks(chunks []io.Reader) io.Reader {
 // GetChunkSize returns the size of chunks managed by the ChunkManager.
 func (cm *ChunkManager) GetChunkSize() int {
 	return int(cm.chunkSize)
-}
-
-type ChunkMetadata struct {
-	ChunkID       string `json:"chunk_id"`
-	ServerID      string `json:"server_id"`
-	ChunkSize     int64  `json:"chunk_size"`
-	ChunkIndex    int    `json:"chunk_index"`
-	ServerAddress string `json:"server_address"`
-	Version       int    `json:"version"`
-	PrimaryNode   string `json:"primary_node"`
-	ReplicaNodes  []string `json:"replica_nodes"`
-	LastModified int64 `json:"last_modified"`
-	Checksum      string `json:"checksum"`
-	OriginalName string `json:"filename"`
-}
-
-// Optional: Add a constructor for convenience
-func NewChunkMetadata(chunkID, serverID string, size int64, index int, address string) ChunkMetadata {
-	return ChunkMetadata{
-		ChunkID:       chunkID,
-		ServerID:      serverID,
-		ChunkSize:     size,
-		ChunkIndex:    index,
-		ServerAddress: address,
-		Version:       1,
-		PrimaryNode: serverID,
-		ReplicaNodes: []string{},
-		LastModified: time.Now().Unix(),
-		Checksum:     "",
-	}
 }
