@@ -56,18 +56,24 @@ func NewReplicationHandler(clientMgr httpclient.ClientManagerInterface, config R
 
 	// dedicated logger for replication
 	logPath := filepath.Join(logDir, "replication-handler.log")
+	outputPaths := []string{"stdout", logPath}
+	logLevel := "error"
+	if os.Getenv("SILENT_TESTS") == "true" {
+		logLevel = "error"
+		outputPaths = []string{"/dev/null"}
+	}
 	replicationLogger, err := logging.GetLogger(logging.LogConfig{
 		ServiceName: "replication-handler",
-		LogLevel:    "info",
-		OutputPaths: []string{"stdout", logPath},
+		LogLevel:    logLevel,
+		OutputPaths: outputPaths,
 	})
 
 	if err != nil {
 		fmt.Printf("Error creating replication handler logger: %v, using standard log", err)
 		minimalLogger, _ := logging.GetLogger(logging.LogConfig{
 			ServiceName: "replication-handler",
-			LogLevel:    "info",
-			OutputPaths: []string{"stdout"},
+			LogLevel:    logLevel,
+			OutputPaths: outputPaths,
 		})
 		replicationLogger = minimalLogger
 	}
@@ -206,7 +212,6 @@ func (h *ReplicationHandler) DistributeAndReplicateUpload(chunkID string, data i
 		zap.String("chunkID", chunkID),
 		zap.Int("dataSize", len(dataBytes)),
 		zap.String("filename", metadata.OriginalName))
-
 	// Get all available nodes
 	nodesStatus := h.clientMgr.GetAllNodesHealth()
 	if nodesStatus.HealthyCount < 2 {

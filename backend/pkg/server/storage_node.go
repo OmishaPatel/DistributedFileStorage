@@ -55,7 +55,7 @@ func NewStorageNodeServer(config StorageNodeConfig) (*StorageNodeServer, error) 
 
 			newLogger, err := logging.GetLogger(logging.LogConfig{
 				ServiceName: "individual-http-handler-" + config.ServerID,
-				LogLevel:    "info", 
+				LogLevel:    "error", 
 				OutputPaths: outputPaths,
 				Development: true,
 			})
@@ -72,7 +72,7 @@ func NewStorageNodeServer(config StorageNodeConfig) (*StorageNodeServer, error) 
 			// No parent logger provided or failed to create, create minimal logger
 			defaultLogger, _ := logging.GetLogger(logging.LogConfig{
 				ServiceName: "individual-http-handler-" + config.ServerID,
-				LogLevel:    "info",
+				LogLevel:    "error",
 				OutputPaths: []string{"stdout"},
 			})
 			nodeLogger = defaultLogger

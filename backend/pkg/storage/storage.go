@@ -49,7 +49,7 @@ func NewLocalStorage(baseDir string) (FileStorage, error) {
 	// Create default logger
 	logger, err := logging.GetLogger(logging.LogConfig{
 		ServiceName: serviceName,
-		LogLevel:    "info",
+		LogLevel:    "error",
 		OutputPaths: []string{"stdout"},
 	})
 	if err != nil {
@@ -99,7 +99,7 @@ func NewLocalStorageWithLogger(baseDir string, parentLogger *logging.Logger, ser
 
 		storageLogger, err := logging.GetLogger(logging.LogConfig{
 			ServiceName: serviceName,
-			LogLevel:    "info",
+			LogLevel:    "error", // TODO change back to info
 			OutputPaths: outputPaths,
 			Development: true,
 		})
@@ -116,7 +116,7 @@ func NewLocalStorageWithLogger(baseDir string, parentLogger *logging.Logger, ser
 	if logger == nil {
 		defaultLogger, err := logging.GetLogger(logging.LogConfig{
 			ServiceName: serviceName,
-			LogLevel:    "info",
+			LogLevel:    "error",
 			OutputPaths: []string{"stdout"},
 		})
 		if err != nil {
