@@ -1,9 +1,5 @@
 #!/bin/bash
 
-# Create required directories
-#mkdir -p logs/main-coordinator logs/distributed-coordinator-service logs/distributed-coordinator-server logs/storage-node dashboards
-
-
 # Start the monitoring stack
 echo "Starting Grafana, Loki, and Promtail..."
 docker-compose up -d

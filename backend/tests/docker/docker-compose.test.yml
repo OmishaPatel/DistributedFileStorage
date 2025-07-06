@@ -1,0 +1,100 @@
+version: '3.8'
+
+services:
+  coordinator:
+    build:
+      context: ../..
+      dockerfile: tests/docker/Dockerfile
+    command: ["go", "run", "./cmd/server"]
+    ports:
+      - "8080:8080"
+    environment:
+      - NODE_ID=coordinator
+      - COORDINATOR_PORT=8080
+      - STORAGE_NODE_server1_URL=http://storage-node-1:8081
+      - STORAGE_NODE_server2_URL=http://storage-node-2:8082
+      - STORAGE_NODE_server3_URL=http://storage-node-3:8083
+      - STORAGE_NODE_server4_URL=http://storage-node-4:8084
+    networks:
+      - storage_network
+
+  storage-node-1:
+    build:
+      context: ../..
+      dockerfile: tests/docker/Dockerfile
+    command: ["go", "run", "./internal/distributedServers/server1"]
+    ports:
+      - "8081:8081"
+    environment:
+      - NODE_ID=server1
+      - STORAGE_PORT=8081
+      - COORDINATOR_URL=http://coordinator:8080
+    networks:
+      - storage_network
+
+  storage-node-2:
+    build:
+      context: ../..
+      dockerfile: tests/docker/Dockerfile
+    command: ["go", "run", "./internal/distributedServers/server2"]
+    ports:
+      - "8082:8082"
+    environment:
+      - NODE_ID=server2
+      - STORAGE_PORT=8082
+      - COORDINATOR_URL=http://coordinator:8080
+    networks:
+      - storage_network
+
+  storage-node-3:
+    build:
+      context: ../..
+      dockerfile: tests/docker/Dockerfile
+    command: ["go", "run", "./internal/distributedServers/server3"]
+    ports:
+      - "8083:8083"
+    environment:
+      - NODE_ID=server3
+      - STORAGE_PORT=8083
+      - COORDINATOR_URL=http://coordinator:8080
+    networks:
+      - storage_network
+
+  storage-node-4:
+    build:
+      context: ../..
+      dockerfile: tests/docker/Dockerfile
+    command: ["go", "run", "./internal/distributedServers/server4"]
+    ports:
+      - "8084:8084"
+    environment:
+      - NODE_ID=server4
+      - STORAGE_PORT=8084
+      - COORDINATOR_URL=http://coordinator:8080
+    networks:
+      - storage_network
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    networks:
+      - storage_network
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    networks:
+      - storage_network
+
+networks:
+  storage_network:
+    driver: bridge
+
+volumes:
+  grafana-storage: 
