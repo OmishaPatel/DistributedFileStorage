@@ -18,6 +18,7 @@ import (
 
 func main() {
 	port := flag.String("port", "8080", "Port to run the server on")
+	logLevel := flag.String("loglevel", "error", "Log level (debug, info, warn, error, fatal)")
 	flag.Parse()
 
 
@@ -28,7 +29,7 @@ func main() {
 	logDir := filepath.Join(projectRoot, "logs", "main-coordinator")
 	logConfig := logging.LogConfig{
 		ServiceName: "main-coordinator",
-		LogLevel:    "info",
+		LogLevel:    *logLevel,
 		OutputPaths: []string{
 			"stdout",
 			filepath.Join(logDir, "main-coordinator.log"),

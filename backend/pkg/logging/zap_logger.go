@@ -28,6 +28,7 @@ type Logger struct {
 	*zap.Logger
 	serviceID string
 	outputPaths []string  // Store paths for later retrieval
+	logLevel string
 }
 
 // GetLogger returns a logger for a specific service
@@ -37,7 +38,6 @@ func GetLogger(config LogConfig) (*Logger, error) {
 	loggerMutex.RUnlock()
 
 	if exists {
-		fmt.Printf("Reusing existing logger for %s\n", config.ServiceName)
 		return logger, nil
 	}
 
@@ -51,13 +51,10 @@ func GetLogger(config LogConfig) (*Logger, error) {
 		return logger, nil
 	}
 
-	fmt.Printf("Creating new logger for %s with paths: %v\n", config.ServiceName, config.OutputPaths)
-
 	// Create log directory if it doesn't exist
 	for _, path := range config.OutputPaths {
 		if filepath.Ext(path) == ".log" {
 			dir := filepath.Dir(path)
-			fmt.Printf("Creating log directory: %s\n", dir)
 			if err := os.MkdirAll(dir, 0755); err != nil {
 				fmt.Printf("ERROR: Failed to create log directory %s: %v\n", dir, err)
 				return nil, fmt.Errorf("failed to create log directory %s: %w", dir, err)
@@ -70,7 +67,6 @@ func GetLogger(config LogConfig) (*Logger, error) {
 			} else {
 				f.Close()
 				os.Remove(testFile)
-				fmt.Printf("Log directory is writable: %s\n", dir)
 			}
 		}
 	}
@@ -98,7 +94,7 @@ func GetLogger(config LogConfig) (*Logger, error) {
 		CallerKey:      "caller",
 		FunctionKey:    zapcore.OmitKey,
 		MessageKey:     "message",
-		StacktraceKey:  "stacktrace",
+		StacktraceKey:  "", //TODO change it back to stacktrace
 		LineEnding:     zapcore.DefaultLineEnding,
 		EncodeLevel:    zapcore.LowercaseLevelEncoder,
 		EncodeTime:     zapcore.ISO8601TimeEncoder,
@@ -111,7 +107,7 @@ func GetLogger(config LogConfig) (*Logger, error) {
 		Level:             zap.NewAtomicLevelAt(level),
 		Development:       config.Development,
 		DisableCaller:     false,
-		DisableStacktrace: false,
+		DisableStacktrace: true,
 		Sampling:          nil,
 		Encoding:          "json",
 		EncoderConfig:     encoderConfig,
@@ -128,6 +124,7 @@ func GetLogger(config LogConfig) (*Logger, error) {
 		Logger:    zapLogger,
 		serviceID: config.ServiceName,
 		outputPaths: config.OutputPaths,  // Store for later use
+		logLevel: config.LogLevel,
 	}
 
 	// Add to registry
@@ -186,3 +183,7 @@ func Shutdown() {
 		_ = logger.Close()
 	}
 } 
+
+func (l *Logger) GetLogLevel() string {
+	return l.logLevel
+}

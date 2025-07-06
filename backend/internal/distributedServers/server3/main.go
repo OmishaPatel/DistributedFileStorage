@@ -13,6 +13,7 @@ import (
 func main() {
 	port := flag.String("port", "8083", "Port to run the server on")
 	uploadDir := flag.String("upload-dir", "./fileStorage/server3", "Directory to store uploaded files")
+	logLevel := flag.String("loglevel", "error", "Log level (debug, info, warn, error, fatal)")
 	flag.Parse()
 
 	projectRoot := filepath.Join("..", "..", "..", "..")  // Go up from backend/cmd/server to project root
@@ -24,7 +25,7 @@ func main() {
 
 	logConfig := logging.LogConfig{
 		ServiceName: "individual-http-server3",
-		LogLevel:    "info",
+		LogLevel:    *logLevel,
 		OutputPaths: []string{
 			"stdout",
 			filepath.Join(logDir, "individual-http-server3.log"),

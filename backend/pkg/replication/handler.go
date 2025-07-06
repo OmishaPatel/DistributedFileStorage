@@ -37,13 +37,14 @@ type downloadResult struct {
 var _ ReplicationManager = (*ReplicationHandler)(nil)
 
 func NewReplicationHandler(clientMgr httpclient.ClientManagerInterface, config ReplicationConfig, logDir string) *ReplicationHandler {
+	
 	// Create log directory if it doesn't exist
 	if err := os.MkdirAll(logDir, 0755); err != nil {
 		log.Printf("Failed to create replication log directory: %v", err)
 		// Fallback to stdout only if directory creation fails
 		replicationLogger, _ := logging.GetLogger(logging.LogConfig{
 			ServiceName: "replication-handler",
-			LogLevel:    "info",
+			LogLevel:    "error",
 			OutputPaths: []string{"stdout"},
 		})
 		return &ReplicationHandler{
@@ -58,10 +59,6 @@ func NewReplicationHandler(clientMgr httpclient.ClientManagerInterface, config R
 	logPath := filepath.Join(logDir, "replication-handler.log")
 	outputPaths := []string{"stdout", logPath}
 	logLevel := "error"
-	if os.Getenv("SILENT_TESTS") == "true" {
-		logLevel = "error"
-		outputPaths = []string{"/dev/null"}
-	}
 	replicationLogger, err := logging.GetLogger(logging.LogConfig{
 		ServiceName: "replication-handler",
 		LogLevel:    logLevel,

@@ -13,6 +13,7 @@ import (
 func main() {
 	port := flag.String("port", "8082", "Port to run the server on")
 	uploadDir := flag.String("upload-dir", "./fileStorage/server2", "Directory to store uploaded files")
+	logLevel := flag.String("loglevel", "error", "Log level (debug, info, warn, error, fatal)")
 	flag.Parse()
 
 	projectRoot := filepath.Join("..", "..", "..", "..")  // Go up from backend/cmd/server to project root
@@ -25,7 +26,7 @@ func main() {
 	// Create logger for this storage node
 	logConfig := logging.LogConfig{
 		ServiceName: "individual-http-server2",
-		LogLevel:    "info",
+		LogLevel:    *logLevel,
 		OutputPaths: []string{
 			"stdout",
 			filepath.Join(logDir, "individual-http-server2.log"),

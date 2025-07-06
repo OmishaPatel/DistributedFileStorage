@@ -53,10 +53,15 @@ func NewCoordinatorServer(config CoordinatorConfig) (*CoordinatorServer,  error)
 	if logPath != "" {
 		outputPaths = append(outputPaths, logPath)
 	}
-	
+	logLevel := "error"
+	if parentLogger != nil {
+		if parentLogLevel := parentLogger.GetLogLevel(); parentLogLevel != "" {
+			logLevel = parentLogLevel
+		}
+	}
 	distLogger, err := logging.GetLogger(logging.LogConfig{
 		ServiceName: "distributed-coordinator-server",
-		LogLevel: "error",
+		LogLevel: logLevel,
 		OutputPaths: outputPaths,
 		Development: true,
 	})
@@ -64,7 +69,7 @@ func NewCoordinatorServer(config CoordinatorConfig) (*CoordinatorServer,  error)
 		log.Printf("Error creating distributed coordinator server logger: %v, using standard log", err)
 		minimalLogger, _ := logging.GetLogger(logging.LogConfig{
 			ServiceName: "distributed-coordinator-server",
-			LogLevel: "error",
+			LogLevel: logLevel,
 			OutputPaths: []string{"stdout"},
 		})
 		distLogger = minimalLogger

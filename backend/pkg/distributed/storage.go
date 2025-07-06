@@ -86,9 +86,13 @@ func NewDistributedStorageWithClientManager(metadataService metadata.MetadataSer
 		outputPaths = append(outputPaths, logPath)
 	}
     logLevel := "error"
-    if os.Getenv("SILENT_TESTS") == "true" {
-        logLevel = "error"
-    }
+
+	if parentLogger != nil {
+		if parentLogLevel := parentLogger.GetLogLevel(); parentLogLevel != "" {
+			logLevel = parentLogLevel
+		}
+	}
+
 	distLogger, err := logging.GetLogger(logging.LogConfig{
 		ServiceName: "distributed-coordinator-service",
 		LogLevel:    logLevel,

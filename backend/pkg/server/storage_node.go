@@ -30,7 +30,12 @@ func NewStorageNodeServer(config StorageNodeConfig) (*StorageNodeServer, error) 
 	var localStorage storage.FileStorage
 	var err error
 	var nodeLogger *logging.Logger
-
+	logLevel := "error"
+	if nodeLogger != nil {
+		if parentLogLevel := nodeLogger.GetLogLevel(); parentLogLevel != "" {
+			logLevel = parentLogLevel
+		}
+	}
 	if config.Storage == nil {
 		// Create local storage if not provided with a server-specific logger
 		// First, create the node's logger to pass to storage
@@ -52,10 +57,9 @@ func NewStorageNodeServer(config StorageNodeConfig) (*StorageNodeServer, error) 
 			if logPath != "" {
 				outputPaths = append(outputPaths, logPath)
 			}
-
 			newLogger, err := logging.GetLogger(logging.LogConfig{
 				ServiceName: "individual-http-handler-" + config.ServerID,
-				LogLevel:    "error", 
+				LogLevel:    logLevel, 
 				OutputPaths: outputPaths,
 				Development: true,
 			})
@@ -72,7 +76,7 @@ func NewStorageNodeServer(config StorageNodeConfig) (*StorageNodeServer, error) 
 			// No parent logger provided or failed to create, create minimal logger
 			defaultLogger, _ := logging.GetLogger(logging.LogConfig{
 				ServiceName: "individual-http-handler-" + config.ServerID,
-				LogLevel:    "error",
+				LogLevel:    logLevel,
 				OutputPaths: []string{"stdout"},
 			})
 			nodeLogger = defaultLogger
