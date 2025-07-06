@@ -48,7 +48,7 @@
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
       "targets": [
         {
-          "expr": "sum(rate(http_errors_total[1m])) by (server_id)",
+          "expr": "(sum(rate(http_errors_total[1m])) by (server_id) / sum(rate(http_requests_total[1m])) by (server_id)) * 100",
           "legendFormat": "{{server_id}} errors",
           "refId": "A"
         }
@@ -154,20 +154,6 @@
     },
     {
       "id": 9,
-      "title": "Active Connections",
-      "type": "timeseries",
-      "datasource": "Prometheus",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
-      "targets": [
-        {
-          "expr": "active_connections",
-          "legendFormat": "{{server_id}} connections",
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "id": 10,
       "title": "Request Status Codes",
       "type": "timeseries",
       "datasource": "Prometheus",
