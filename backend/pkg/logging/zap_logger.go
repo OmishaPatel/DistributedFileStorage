@@ -107,7 +107,7 @@ func GetLogger(config LogConfig) (*Logger, error) {
 		Level:             zap.NewAtomicLevelAt(level),
 		Development:       config.Development,
 		DisableCaller:     false,
-		DisableStacktrace: true,
+		DisableStacktrace: false,
 		Sampling:          nil,
 		Encoding:          "json",
 		EncoderConfig:     encoderConfig,
